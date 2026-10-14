@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: scripts/install_dependencies.sh --yes
+      - name: Configure
+        run: cmake --preset system -DZMS_ENABLE_LIVE_TESTS=ON
+      - name: Build
+        run: cmake --build --preset system -j 2
+      - name: Test
+        run: ctest --preset system
+      - name: Package
+        run: cpack --config build/system/CPackConfig.cmake

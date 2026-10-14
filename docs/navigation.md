@@ -1,0 +1,7 @@
+# Navigation baseline
+
+`zms_navigation` accepts a single active waypoint route and drives a differential drive base. The control loop runs at the configured rate. Requests, odometry, optional scans, and optional maps enter bounded queues; the control loop owns the active command. Grid search runs on a separate cancellable worker. It publishes zero velocity on cancel, odometry timeout, stale scan after scans have begun, obstacle stop, success, replacement, and process shutdown.
+
+The current follower turns toward a waypoint, then drives toward it under speed and acceleration limits. It aligns with the waypoint yaw at the final target. When a map is available when a goal is accepted, the worker searches an inflated occupancy grid with eight-neighbor A* and prevents diagonal corner cutting. Unknown cells are blocked. A failed or out-of-bounds path publishes `planning_failed`. When scans are available, a return in the forward half-plane closer than the configured footprint radius plus margin stops motion until clearance returns. If a previously available scan goes stale, the active command fails. This is a stop check, not a local avoidance planner. Use it only in a clear test area with an independent robot watchdog.
+
+The `features` field of `navigation/status` lists exactly `waypoint_route`, `differential_drive`, `scan_obstacle_stop`, and `grid_astar`. OMPL planning and additional drive models are not advertised.

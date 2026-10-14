@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "robot_prefix": "demo/robot1",
+  "control_rate_hz": 20,
+  "odom_timeout_s": 1.0,
+  "scan_timeout_s": 1.0,
+  "footprint_radius": 0.25,
+  "obstacle_margin": 0.1,
+  "limits": {
+    "max_linear_speed": 0.5,
+    "max_angular_speed": 1.0,
+    "max_linear_acceleration": 0.5,
+    "max_angular_acceleration": 1.0,
+    "position_tolerance": 0.05,
+    "yaw_tolerance": 0.1,
+    "lookahead_distance": 0.4
+  }
+}

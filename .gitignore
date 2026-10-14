@@ -1,0 +1,6 @@
+build/
+out/
+.cache/
+*.swp
+*.tar.gz
+_CPack_Packages/

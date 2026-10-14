@@ -1,0 +1,5 @@
+set(ZMS_VERSIONS_ONLY ON)
+include(${CMAKE_CURRENT_LIST_DIR}/dependencies.cmake)
+message("zenohc=${ZMS_ZENOHC_VERSION}")
+message("zenohcxx=${ZMS_ZENOHCXX_VERSION}")
+message("json=${ZMS_JSON_VERSION}")

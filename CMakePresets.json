@@ -1,0 +1,30 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ZMS_FETCH_MISSING_DEPENDENCIES": "ON"
+      }
+    },
+    {
+      "name": "system",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/system",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ZMS_FETCH_MISSING_DEPENDENCIES": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {"name": "release", "configurePreset": "release"},
+    {"name": "system", "configurePreset": "system"}
+  ],
+  "testPresets": [
+    {"name": "system", "configurePreset": "system", "output": {"outputOnFailure": true}}
+  ]
+}

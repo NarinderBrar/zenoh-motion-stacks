@@ -1,0 +1,66 @@
+# Zenoh motion contract
+
+The current implemented contract major version is **1**. Every payload this repository sends is UTF-8 JSON with Zenoh encoding `application/json`. The `contract` field is the integer `1`. Clients must reject an unknown major version. Command identifiers and client identifiers are nonempty strings of at most 128 characters.
+
+All keys below are relative to the configured robot prefix. A prefix has no leading slash. For example, prefix `demo/robot1` and suffix `odom` form `demo/robot1/odom`.
+
+| Key suffix | Zenoh operation | Current implementation |
+|---|---|---|
+| `navigation/goal` | queryable | Submit waypoint route; accept or reject reply |
+| `navigation/cancel` | queryable | Cancel matching command owned by caller |
+| `navigation/status` | queryable | Current state, version, features |
+| `navigation/feedback` | publish | Current waypoint index and pose |
+| `navigation/result` | publish | Terminal command state |
+| `navigation/alive` | liveliness token | Presence |
+| `cmd_vel` | publish | Linear and angular velocity |
+| `odom` | subscribe | Base pose |
+| `scan` | subscribe | Optional 2D range scan; forward obstacle stop |
+| `map` | subscribe | Optional occupancy grid for A* planning |
+| `manipulation/target` | queryable | Submit a pose or joint target; server pending |
+| `manipulation/cancel` | queryable | Cancel an owned manipulation command; server pending |
+| `manipulation/status` | queryable | State, version, and features; server pending |
+| `manipulation/feedback` | publish | Execution progress; server pending |
+| `manipulation/result` | publish | Terminal result; server pending |
+| `manipulation/alive` | liveliness token | Presence; server pending |
+| `cmd_joints` | publish | Joint command samples; server pending |
+| `joint_states` | subscribe | Joint positions and velocities; server pending |
+
+## Navigation requests
+
+Submit one or more waypoints, in order:
+
+```json
+{"contract":1,"command_id":"goal-1","client_id":"operator-1","waypoints":[{"x":1.0,"y":0.0,"yaw":0.0}]}
+```
+
+The queryable replies with `{"contract":1,"accepted":true,"command_id":"goal-1","client_id":"operator-1"}`. A rejected request has `accepted:false`, `reason`, and `message` fields. Defined reasons are `invalid_request`, `busy`, and `not_owner`.
+
+Cancel uses `{"contract":1,"command_id":"goal-1","client_id":"operator-1"}`. Cancelling while idle returns `{"contract":1,"state":"idle"}`. A different client cannot cancel the active command. A new goal from the same owner replaces it and publishes a cancelled result for the old command.
+
+`navigation/status` takes no payload. It reports `contract`, `state`, `stack_version`, `features`, and `map_available`. While a command is pending or active it also reports `command_id` and `client_id`. States are `idle`, `pending`, `active`, `succeeded`, `cancelled`, and `failed`; only `pending`, `active`, and `idle` appear in status replies in this release.
+
+Feedback contains `contract`, `command_id`, `client_id`, `state`, `waypoint_index`, `x`, `y`, and `yaw`. Result contains `contract`, `command_id`, `client_id`, and a terminal `state`. Failures also contain `reason` and `message`. Defined failure reasons are `stale_odom`, `stale_scan`, `planning_failed`, and `shutdown`. A replaced command reports reason `replaced`.
+
+The robot publishes odometry as `{"x":0.0,"y":0.0,"yaw":0.0}` with optional velocity fields. The stack publishes `{"contract":1,"linear":0.2,"angular":0.0}` to `cmd_vel`. Linear speed is meters per second, angular speed and yaw are radians per second and radians, and position is meters in a consistent world frame. The robot must stop if velocity commands cease; the bundled mock stops after 0.5 seconds.
+
+## Manipulation requests
+
+`manipulation/target` accepts exactly one of `pose` or `joints`. Pose targets have finite `x`, `y`, `z` in meters and a unit quaternion `qx`, `qy`, `qz`, `qw`. The optional `base_frame` and `eef_frame` strings override the configured frames for this command:
+
+```json
+{"contract":1,"command_id":"pose-1","client_id":"operator-1","pose":{"x":0.2,"y":0.1,"z":0.4,"qx":0,"qy":0,"qz":0,"qw":1},"base_frame":"base","eef_frame":"tool"}
+```
+
+Joint targets carry matching arrays of 1 to 64 unique names and finite positions in radians. The stack rejects names outside its configured joint set and positions outside model limits:
+
+```json
+{"contract":1,"command_id":"joints-1","client_id":"operator-1","joints":{"name":["joint_1","joint_2"],"position":[0.3,-0.2]}}
+```
+
+The queryable reply, cancel request, command ownership rules, states, and terminal results have the same fields and meanings as navigation. `manipulation/feedback` additionally carries `progress` from 0 to 1 and `tracking_error` in radians. The stack publishes `cmd_joints` as `{"contract":1,"name":["joint_1"],"position":[0.3]}` and accepts `joint_states` as `{"name":["joint_1"],"position":[0.3],"velocity":[0.0]}`. All arrays must have equal length and names must be unique.
+
+## Optional navigation sensors
+
+`scan` is a JSON object with `contract`, finite `angle_min`, positive `angle_increment`, nonnegative `range_min`, positive `range_max`, and a `ranges` array in meters. A JSON `null` range means no return. The server considers valid returns in the forward half-plane; a reading inside the configured clearance stops motion. `map` is a JSON object with `contract`, positive integer `width` and `height`, positive `resolution` in meters per cell, `origin` with finite `x`, `y`, and `yaw`, and a row-major `data` array of length `width * height`. Cells are `-1` for unknown or 0 to 100 for occupancy probability. The server plans through cells below 50 and inflates blocked cells by the configured footprint radius plus margin. A map received after a goal starts applies to the next goal.
+
+The manipulation server is not implemented yet. The typed request codec in the contract library validates its target payloads now. A future conformance suite will verify server behavior against these fields.
