@@ -36,7 +36,7 @@ target_include_directories(zms_navigation_core PUBLIC
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(zms_navigation_core PUBLIC zms_contract)
 
-add_library(zms_manipulation_core manipulation/src/JointModel.cpp)
+add_library(zms_manipulation_core manipulation/src/JointModel.cpp manipulation/src/JointMotion.cpp)
 add_library(motion_stacks::manipulation_core ALIAS zms_manipulation_core)
 set_target_properties(zms_manipulation_core PROPERTIES EXPORT_NAME manipulation_core)
 target_include_directories(zms_manipulation_core PUBLIC

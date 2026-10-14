@@ -90,4 +90,28 @@ JointModel::orderedPositions(const contract::JointTarget &target) const {
   return ordered;
 }
 
+std::optional<std::vector<double>>
+JointModel::measuredPositions(const std::vector<std::string> &names,
+                              const std::vector<double> &positions) const {
+  if (names.size() != positions.size()) {
+    return std::nullopt;
+  }
+  std::unordered_map<std::string, double> byName;
+  for (std::size_t index = 0; index < names.size(); ++index) {
+    if (!byName.emplace(names[index], positions[index]).second) {
+      return std::nullopt;
+    }
+  }
+  std::vector<double> ordered;
+  ordered.reserve(joints_.size());
+  for (const auto &joint : joints_) {
+    const auto found = byName.find(joint.name);
+    if (found == byName.end() || !std::isfinite(found->second)) {
+      return std::nullopt;
+    }
+    ordered.push_back(found->second);
+  }
+  return ordered;
+}
+
 }

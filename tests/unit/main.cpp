@@ -1,14 +1,18 @@
 #include <zms/contract/Contract.hpp>
 #include <zms/manipulation/JointModel.hpp>
+#include <zms/manipulation/JointMotion.hpp>
 #include <zms/navigation/GridPlanner.hpp>
 #include <zms/navigation/Navigation.hpp>
+#include <zms/navigation/PlanningWorker.hpp>
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <numbers>
 #include <stop_token>
+#include <thread>
 
 TEST(Contract, RejectsUnknownVersionAndUnknownFields) {
   const nlohmann::json valid = {
@@ -107,6 +111,84 @@ TEST(Manipulation, LoadsUrdfChainAndChecksTargets) {
                std::invalid_argument);
 }
 
+TEST(Manipulation, ReadsChainJointsFromFullJointState) {
+  const auto model = zms::manipulation::JointModel::fromUrdf(
+      "config/examples/two_joint_arm.urdf", "base", "tool");
+  const auto measured = model.measuredPositions(
+      {"wheel_left", "joint_2", "gripper", "joint_1"}, {4.0, -0.2, 0.01, 0.3});
+  ASSERT_TRUE(measured.has_value());
+  ASSERT_EQ(measured->size(), 2);
+  EXPECT_DOUBLE_EQ(measured->front(), 0.3);
+  EXPECT_DOUBLE_EQ(measured->back(), -0.2);
+  const double beyondLimit = model.joints().front().upper + 0.01;
+  const auto overshoot =
+      model.measuredPositions({"joint_1", "joint_2"}, {beyondLimit, 0.0});
+  ASSERT_TRUE(overshoot.has_value());
+  EXPECT_DOUBLE_EQ(overshoot->front(), beyondLimit);
+  EXPECT_FALSE(model.measuredPositions({"joint_1", "wheel_left"}, {0.0, 0.0})
+                   .has_value());
+  EXPECT_FALSE(
+      model
+          .measuredPositions({"joint_1", "joint_2", "joint_1"}, {0.0, 0.0, 0.0})
+          .has_value());
+  EXPECT_FALSE(
+      model.measuredPositions({"joint_1", "joint_2"}, {0.0}).has_value());
+}
+
+TEST(Manipulation, JointStepBrakesWithinAccelerationLimit) {
+  const double maxVelocity = 1.0;
+  const double maxAcceleration = 2.0;
+  const double elapsed = 0.05;
+  for (const double goal : {1.0, -0.7, 0.003}) {
+    zms::manipulation::JointStep state;
+    double peakVelocityChange = 0.0;
+    int steps = 0;
+    while ((state.position != goal || state.velocity != 0.0) && steps < 1000) {
+      const auto next =
+          zms::manipulation::stepTowards(state.position, state.velocity, goal,
+                                         maxVelocity, maxAcceleration, elapsed);
+      peakVelocityChange = std::max(peakVelocityChange,
+                                    std::abs(next.velocity - state.velocity));
+      EXPECT_LE(std::abs(next.velocity), maxVelocity + 1e-12);
+      EXPECT_LE(std::abs(next.position), std::abs(goal) + 1e-12);
+      state = next;
+      ++steps;
+    }
+    EXPECT_LT(steps, 1000);
+    EXPECT_DOUBLE_EQ(state.position, goal);
+    EXPECT_LE(peakVelocityChange, maxAcceleration * elapsed + 1e-9);
+  }
+}
+
+TEST(PlanningWorker, ReportsSubmittedWaypointForEachRoutePoint) {
+  auto grid = std::make_shared<zms::navigation::OccupancyGrid>(
+      zms::navigation::OccupancyGrid{
+          10, 10, 1.0, {}, std::vector<std::int8_t>(100, 0)});
+  zms::navigation::PlanningWorker worker;
+  const auto generation = worker.submit(
+      {grid, {0.5, 0.5, 0.0}, {{5.5, 3.5, 0.0}, {8.5, 8.5, 0.0}}, 0.0});
+  std::optional<zms::navigation::PlanOutcome> outcome;
+  for (int attempt = 0; attempt < 500 && !outcome; ++attempt) {
+    outcome = worker.poll();
+    if (!outcome) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+  }
+  ASSERT_TRUE(outcome.has_value());
+  EXPECT_EQ(outcome->generation, generation);
+  ASSERT_TRUE(outcome->error.empty()) << outcome->error;
+  ASSERT_EQ(outcome->waypointIndices.size(), outcome->route.size());
+  EXPECT_EQ(outcome->waypointIndices.front(), 0);
+  EXPECT_EQ(outcome->waypointIndices.back(), 1);
+  EXPECT_TRUE(std::is_sorted(outcome->waypointIndices.begin(),
+                             outcome->waypointIndices.end()));
+  const auto firstGoal = std::find(outcome->waypointIndices.begin(),
+                                   outcome->waypointIndices.end(), 1) -
+                         outcome->waypointIndices.begin() - 1;
+  EXPECT_DOUBLE_EQ(outcome->route[firstGoal].x, 5.5);
+  EXPECT_DOUBLE_EQ(outcome->route[firstGoal].y, 3.5);
+}
+
 TEST(Navigation, ReachesWaypointAndLimitsAcceleration) {
   const std::vector<zms::contract::Waypoint> route = {{1.0, 0.0, 0.0}};
   const zms::navigation::Limits limits;
@@ -118,6 +200,49 @@ TEST(Navigation, ReachesWaypointAndLimitsAcceleration) {
                                              first.velocity, limits, 0.1);
   EXPECT_TRUE(final.reached);
   EXPECT_DOUBLE_EQ(final.velocity.linear, 0.0);
+}
+
+TEST(Navigation, KeepsTurningAtGoalAfterSmallDrift) {
+  const std::vector<zms::contract::Waypoint> route = {
+      {1.0, 0.0, std::numbers::pi / 2.0}};
+  const zms::navigation::Limits limits;
+  const zms::navigation::Pose drifted{1.0 + limits.positionTolerance * 1.5, 0.0,
+                                      0.0};
+  const auto released =
+      zms::navigation::follow(drifted, route, 0, {}, limits, 1.0, true, false);
+  EXPECT_FALSE(released.aligning);
+  const auto aligning =
+      zms::navigation::follow(drifted, route, 0, {}, limits, 1.0, true, true);
+  EXPECT_TRUE(aligning.aligning);
+  EXPECT_FALSE(aligning.reached);
+  EXPECT_DOUBLE_EQ(aligning.velocity.linear, 0.0);
+  EXPECT_GT(aligning.velocity.angular, 0.0);
+  const zms::navigation::Pose aligned{1.0 + limits.positionTolerance * 1.5, 0.0,
+                                      std::numbers::pi / 2.0};
+  EXPECT_TRUE(
+      zms::navigation::follow(aligned, route, 0, {}, limits, 1.0, true, true)
+          .reached);
+  const zms::navigation::Pose tooFar{1.0 + limits.positionTolerance * 3.0, 0.0,
+                                     std::numbers::pi / 2.0};
+  const auto beyond =
+      zms::navigation::follow(tooFar, route, 0, {}, limits, 1.0, true, true);
+  EXPECT_FALSE(beyond.reached);
+  EXPECT_FALSE(beyond.aligning);
+}
+
+TEST(Navigation, ProgressMonitorFailsOnlyWithoutImprovement) {
+  zms::navigation::ProgressMonitor monitor(2.0);
+  EXPECT_FALSE(monitor.stalled(0, 1.0, 0.5, 0.0));
+  EXPECT_FALSE(monitor.stalled(0, 1.0, 0.5, 1.9));
+  EXPECT_TRUE(monitor.stalled(0, 1.0, 0.5, 2.1));
+  monitor.reset();
+  EXPECT_FALSE(monitor.stalled(0, 1.0, 0.5, 10.0));
+  EXPECT_FALSE(monitor.stalled(0, 0.9, 0.5, 11.5));
+  EXPECT_FALSE(monitor.stalled(0, 0.9, 0.3, 13.0));
+  EXPECT_FALSE(monitor.stalled(0, 0.9, 0.3, 14.9));
+  EXPECT_TRUE(monitor.stalled(0, 0.89, 0.29, 15.1));
+  EXPECT_FALSE(monitor.stalled(1, 2.0, 0.0, 15.2));
+  EXPECT_THROW(zms::navigation::ProgressMonitor(0.0), std::invalid_argument);
 }
 
 TEST(Navigation, SlowsNearWaypoint) {

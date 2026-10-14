@@ -1,10 +1,12 @@
 #include <zms/contract/Contract.hpp>
 #include <zms/contract/ZenohClient.hpp>
 #include <zms/manipulation/JointModel.hpp>
+#include <zms/manipulation/JointMotion.hpp>
 
 #include <zenoh.hxx>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -91,7 +93,11 @@ Config loadConfig(const std::string &path) {
     throw std::invalid_argument("config.version must be 1");
   }
   Config result;
-  result.robotPrefix = requiredString(document, "robot_prefix");
+  if (!document.contains("robot_prefix") ||
+      !document.at("robot_prefix").is_string()) {
+    throw std::invalid_argument("config.robot_prefix must be a string");
+  }
+  result.robotPrefix = document.at("robot_prefix").get<std::string>();
   zms::contract::key(result.robotPrefix, "joint_states");
   result.urdfPath = requiredString(document, "urdf_path");
   if (std::filesystem::path(result.urdfPath).is_relative()) {
@@ -122,10 +128,13 @@ Config loadConfig(const std::string &path) {
   return result;
 }
 
+enum class Claim { Waiting, Handled, Abandoned };
+
 struct Request {
   enum class Kind { Target, Cancel } kind;
   Json payload;
   std::promise<Json> reply;
+  std::atomic<Claim> claim = Claim::Waiting;
 };
 
 struct Mailbox {
@@ -141,17 +150,12 @@ orderedState(const Json &payload, const zms::manipulation::JointModel &model) {
       !payload.contains("position") || !payload.at("name").is_array() ||
       !payload.at("position").is_array() ||
       payload.at("name").size() != payload.at("position").size() ||
-      payload.at("name").size() > 64) {
+      payload.at("name").size() > 1024) {
     return std::nullopt;
   }
-  zms::contract::JointTarget target;
-  target.names = payload.at("name").get<std::vector<std::string>>();
-  target.positions = payload.at("position").get<std::vector<double>>();
-  try {
-    return model.orderedPositions(target);
-  } catch (const std::exception &) {
-    return std::nullopt;
-  }
+  return model.measuredPositions(
+      payload.at("name").get<std::vector<std::string>>(),
+      payload.at("position").get<std::vector<double>>());
 }
 
 void sendJoints(zenoh::Session &session, const std::string &key,
@@ -198,11 +202,15 @@ int run(const Config &config, const zms::manipulation::JointModel &model) {
         if (mailbox.requests.size() >= 32) {
           throw std::runtime_error("request queue is full");
         }
-        mailbox.requests.push_back(std::move(request));
+        mailbox.requests.push_back(request);
       }
       if (future.wait_for(std::chrono::seconds(2)) !=
           std::future_status::ready) {
-        throw std::runtime_error("control loop did not answer in time");
+        auto expected = Claim::Waiting;
+        if (request->claim.compare_exchange_strong(expected,
+                                                   Claim::Abandoned)) {
+          throw std::runtime_error("control loop did not answer in time");
+        }
       }
       return future.get();
     };
@@ -260,6 +268,10 @@ int run(const Config &config, const zms::manipulation::JointModel &model) {
       }
     }
     for (const auto &request : requests) {
+      auto expected = Claim::Waiting;
+      if (!request->claim.compare_exchange_strong(expected, Claim::Handled)) {
+        continue;
+      }
       if (request->kind == Request::Kind::Target) {
         const auto target = zms::contract::parseTarget(request->payload);
         if (!std::holds_alternative<zms::contract::JointTarget>(target.value)) {
@@ -356,22 +368,12 @@ int run(const Config &config, const zms::manipulation::JointModel &model) {
         bool reached = true;
         double tracking = 0.0;
         for (std::size_t index = 0; index < goal.size(); ++index) {
-          const double difference = goal[index] - commanded[index];
-          const double desiredVelocity = std::clamp(
-              difference * config.controlRateHz,
-              -model.joints()[index].velocity, model.joints()[index].velocity);
-          const double velocityStep =
-              config.acceleration / config.controlRateHz;
-          velocity[index] += std::clamp(desiredVelocity - velocity[index],
-                                        -velocityStep, velocityStep);
-          const double step = velocity[index] / config.controlRateHz;
-          if (difference == 0.0 || (step * difference > 0.0 &&
-                                    std::abs(step) >= std::abs(difference))) {
-            commanded[index] = goal[index];
-            velocity[index] = 0.0;
-          } else {
-            commanded[index] += step;
-          }
+          const auto step = zms::manipulation::stepTowards(
+              commanded[index], velocity[index], goal[index],
+              model.joints()[index].velocity, config.acceleration,
+              1.0 / config.controlRateHz);
+          commanded[index] = step.position;
+          velocity[index] = step.velocity;
           commanded[index] =
               std::clamp(commanded[index], model.joints()[index].lower,
                          model.joints()[index].upper);

@@ -9,10 +9,49 @@
 namespace zms::navigation {
 namespace {
 
+constexpr double alignmentReleaseFactor = 2.0;
+
 double limitChange(double current, double desired, double maximumChange) {
   return current + std::clamp(desired - current, -maximumChange, maximumChange);
 }
 
+}
+
+ProgressMonitor::ProgressMonitor(double timeoutSeconds)
+    : timeoutSeconds_(timeoutSeconds) {
+  if (!std::isfinite(timeoutSeconds) || timeoutSeconds <= 0.0) {
+    throw std::invalid_argument("progress timeout must be positive");
+  }
+}
+
+void ProgressMonitor::reset() { tracking_ = false; }
+
+bool ProgressMonitor::stalled(std::size_t waypointIndex, double distance,
+                              double yawError, double nowSeconds) {
+  constexpr double distanceProgress = 0.02;
+  constexpr double yawProgress = 0.05;
+  const double absoluteYawError = std::abs(yawError);
+  if (!tracking_ || waypointIndex != waypointIndex_) {
+    tracking_ = true;
+    waypointIndex_ = waypointIndex;
+    bestDistance_ = distance;
+    bestYawError_ = absoluteYawError;
+    lastProgressSeconds_ = nowSeconds;
+    return false;
+  }
+  bool improved = false;
+  if (distance < bestDistance_ - distanceProgress) {
+    bestDistance_ = distance;
+    improved = true;
+  }
+  if (absoluteYawError < bestYawError_ - yawProgress) {
+    bestYawError_ = absoluteYawError;
+    improved = true;
+  }
+  if (improved) {
+    lastProgressSeconds_ = nowSeconds;
+  }
+  return nowSeconds - lastProgressSeconds_ > timeoutSeconds_;
 }
 
 double normalizeAngle(double angle) {
@@ -44,7 +83,7 @@ StepResult follow(const Pose &pose,
                   const std::vector<contract::Waypoint> &waypoints,
                   std::size_t waypointIndex, const Velocity &previous,
                   const Limits &limits, double elapsedSeconds,
-                  bool enforceIntermediateYaw) {
+                  bool enforceIntermediateYaw, bool aligning) {
   if (waypoints.empty() || waypointIndex >= waypoints.size()) {
     throw std::invalid_argument("active route has no current waypoint");
   }
@@ -58,14 +97,17 @@ StepResult follow(const Pose &pose,
   const double yawError = normalizeAngle(target.yaw - pose.yaw);
   const bool needsYaw =
       enforceIntermediateYaw || waypointIndex + 1 == waypoints.size();
-  if (distance <= limits.positionTolerance &&
-      (!needsYaw || std::abs(yawError) <= limits.yawTolerance)) {
+  const bool inPosition =
+      distance <= limits.positionTolerance ||
+      (aligning && needsYaw &&
+       distance <= limits.positionTolerance * alignmentReleaseFactor);
+  if (inPosition && (!needsYaw || std::abs(yawError) <= limits.yawTolerance)) {
     const std::size_t next = waypointIndex + 1;
-    return {{}, next == waypoints.size(), next};
+    return {{}, next == waypoints.size(), next, false};
   }
   double desiredLinear = 0.0;
   double desiredAngular = 0.0;
-  if (distance <= limits.positionTolerance) {
+  if (inPosition) {
     desiredAngular = std::clamp(yawError * 2.0, -limits.maxAngularSpeed,
                                 limits.maxAngularSpeed);
   } else {
@@ -90,7 +132,8 @@ StepResult follow(const Pose &pose,
            limitChange(previous.angular, desiredAngular,
                        limits.maxAngularAcceleration * elapsedSeconds)},
           false,
-          waypointIndex};
+          waypointIndex,
+          inPosition};
 }
 
 }

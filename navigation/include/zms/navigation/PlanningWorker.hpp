@@ -23,6 +23,7 @@ struct PlanRequest {
 struct PlanOutcome {
   std::uint64_t generation = 0;
   std::vector<contract::Waypoint> route;
+  std::vector<std::size_t> waypointIndices;
   std::string error;
 };
 

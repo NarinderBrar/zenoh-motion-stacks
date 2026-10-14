@@ -60,7 +60,9 @@ void PlanningWorker::run(std::stop_token stop) {
     outcome.generation = job->generation;
     try {
       Pose current = job->request.start;
-      for (const auto &waypoint : job->request.waypoints) {
+      const auto &waypoints = job->request.waypoints;
+      for (std::size_t index = 0; index < waypoints.size(); ++index) {
+        const auto &waypoint = waypoints[index];
         auto segment = planGrid(*job->request.grid, current, waypoint,
                                 job->request.inflationRadius, job->cancelToken);
         if (outcome.route.size() + segment.size() > 20000) {
@@ -68,6 +70,8 @@ void PlanningWorker::run(std::stop_token stop) {
         }
         outcome.route.insert(outcome.route.end(), segment.begin(),
                              segment.end());
+        outcome.waypointIndices.insert(outcome.waypointIndices.end(),
+                                       segment.size(), index);
         current = {waypoint.x, waypoint.y, waypoint.yaw};
       }
     } catch (const std::exception &error) {

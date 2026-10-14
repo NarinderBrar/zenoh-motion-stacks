@@ -2,6 +2,7 @@
 
 #include <zms/contract/Contract.hpp>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,9 @@ public:
   const std::vector<JointLimit> &joints() const;
   std::vector<double>
   orderedPositions(const contract::JointTarget &target) const;
+  std::optional<std::vector<double>>
+  measuredPositions(const std::vector<std::string> &names,
+                    const std::vector<double> &positions) const;
 
 private:
   std::vector<JointLimit> joints_;

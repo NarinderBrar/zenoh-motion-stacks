@@ -5,6 +5,7 @@
 
 #include <zenoh.hxx>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -38,6 +39,7 @@ struct Config {
   double scanTimeoutSeconds = 1.0;
   double footprintRadius = 0.25;
   double obstacleMargin = 0.1;
+  double progressTimeoutSeconds = 15.0;
   zms::navigation::Limits limits;
 };
 
@@ -78,7 +80,7 @@ Config loadConfig(const std::string &path) {
   knownFields(document,
               {"version", "robot_prefix", "control_rate_hz", "odom_timeout_s",
                "scan_timeout_s", "footprint_radius", "obstacle_margin",
-               "limits"},
+               "progress_timeout_s", "limits"},
               "config");
   if (!document.contains("version") || document.at("version") != 1) {
     throw std::invalid_argument("config.version must be 1");
@@ -107,6 +109,8 @@ Config loadConfig(const std::string &path) {
       positiveNumber(document, "footprint_radius", result.footprintRadius);
   result.obstacleMargin =
       positiveNumber(document, "obstacle_margin", result.obstacleMargin);
+  result.progressTimeoutSeconds = positiveNumber(document, "progress_timeout_s",
+                                                 result.progressTimeoutSeconds);
   if (document.contains("limits")) {
     const auto &limits = document.at("limits");
     knownFields(limits,
@@ -133,10 +137,13 @@ Config loadConfig(const std::string &path) {
   return result;
 }
 
+enum class Claim { Waiting, Handled, Abandoned };
+
 struct Request {
   enum class Kind { Goal, Cancel } kind;
   Json payload;
   std::promise<Json> reply;
+  std::atomic<Claim> claim = Claim::Waiting;
 };
 
 struct Mailbox {
@@ -199,11 +206,15 @@ int run(const Config &config) {
         if (mailbox.requests.size() >= 32) {
           throw std::runtime_error("request queue is full");
         }
-        mailbox.requests.push_back(std::move(request));
+        mailbox.requests.push_back(request);
       }
       if (future.wait_for(std::chrono::seconds(2)) !=
           std::future_status::ready) {
-        throw std::runtime_error("control loop did not answer in time");
+        auto expected = Claim::Waiting;
+        if (request->claim.compare_exchange_strong(expected,
+                                                   Claim::Abandoned)) {
+          throw std::runtime_error("control loop did not answer in time");
+        }
       }
       return future.get();
     };
@@ -307,13 +318,23 @@ int run(const Config &config) {
   std::optional<double> nearestScan;
   std::shared_ptr<const zms::navigation::OccupancyGrid> latestMap;
   std::vector<zms::contract::Waypoint> route;
+  std::vector<std::size_t> routeWaypointIndices;
   bool routePlannedFromMap = false;
   std::optional<std::uint64_t> planGeneration;
   Clock::time_point lastOdom;
   Clock::time_point lastScan;
   std::size_t waypointIndex = 0;
+  bool aligning = false;
+  zms::navigation::ProgressMonitor progress(config.progressTimeoutSeconds);
+  const auto loopStarted = Clock::now();
   zms::navigation::Velocity previous;
   Clock::time_point commandStarted = Clock::now();
+  const auto submittedWaypointIndex = [&] {
+    if (routePlannedFromMap && waypointIndex < routeWaypointIndices.size()) {
+      return routeWaypointIndices[waypointIndex];
+    }
+    return waypointIndex;
+  };
   const auto period = std::chrono::duration<double>(1.0 / config.controlRateHz);
   auto next = Clock::now();
   auto previousTick = next;
@@ -340,6 +361,10 @@ int run(const Config &config) {
       }
     }
     for (const auto &request : requests) {
+      auto expected = Claim::Waiting;
+      if (!request->claim.compare_exchange_strong(expected, Claim::Handled)) {
+        continue;
+      }
       if (request->kind == Request::Kind::Goal) {
         const auto incoming = zms::contract::parseGoal(request->payload);
         if (active && active->clientId != incoming.clientId) {
@@ -362,6 +387,8 @@ int run(const Config &config) {
         planGeneration.reset();
         commandStarted = now;
         waypointIndex = 0;
+        aligning = false;
+        progress.reset();
         previous = {};
         request->reply.set_value(
             zms::contract::accepted(incoming.commandId, incoming.clientId));
@@ -408,8 +435,11 @@ int run(const Config &config) {
         route.clear();
       } else {
         route = std::move(outcome->route);
+        routeWaypointIndices = std::move(outcome->waypointIndices);
         routePlannedFromMap = true;
         waypointIndex = 0;
+        aligning = false;
+        progress.reset();
       }
     }
     if (active) {
@@ -440,6 +470,25 @@ int run(const Config &config) {
         planGeneration.reset();
         planner.cancel();
         previous = {};
+      } else if (!route.empty() && waypointIndex < route.size() &&
+                 progress.stalled(
+                     waypointIndex,
+                     std::hypot(route[waypointIndex].x - pose->x,
+                                route[waypointIndex].y - pose->y),
+                     zms::navigation::normalizeAngle(route[waypointIndex].yaw -
+                                                     pose->yaw),
+                     std::chrono::duration<double>(now - loopStarted)
+                         .count())) {
+        publishVelocity(session, velocityKey, {});
+        publishResult(session, resultKey, *active,
+                      zms::contract::CommandState::Failed, "no_progress",
+                      "no progress toward the current waypoint within "
+                      "progress_timeout_s");
+        active.reset();
+        route.clear();
+        planGeneration.reset();
+        planner.cancel();
+        previous = {};
       } else if (nearestScan && *nearestScan < config.footprintRadius +
                                                    config.obstacleMargin) {
         publishVelocity(session, velocityKey, {});
@@ -447,7 +496,7 @@ int run(const Config &config) {
         Json feedback =
             zms::contract::status(active->commandId, active->clientId,
                                   zms::contract::CommandState::Active);
-        feedback["waypoint_index"] = waypointIndex;
+        feedback["waypoint_index"] = submittedWaypointIndex();
         feedback["obstacle_stopped"] = true;
         feedback["x"] = pose->x;
         feedback["y"] = pose->y;
@@ -461,7 +510,8 @@ int run(const Config &config) {
             *pose, route, waypointIndex, previous, config.limits,
             std::max(0.001,
                      std::chrono::duration<double>(now - previousTick).count()),
-            !routePlannedFromMap);
+            !routePlannedFromMap, aligning);
+        aligning = step.waypointIndex == waypointIndex && step.aligning;
         waypointIndex = step.waypointIndex;
         previous = step.velocity;
         publishVelocity(session, velocityKey, step.velocity);
@@ -475,7 +525,7 @@ int run(const Config &config) {
           Json feedback =
               zms::contract::status(active->commandId, active->clientId,
                                     zms::contract::CommandState::Active);
-          feedback["waypoint_index"] = waypointIndex;
+          feedback["waypoint_index"] = submittedWaypointIndex();
           feedback["x"] = pose->x;
           feedback["y"] = pose->y;
           feedback["yaw"] = pose->yaw;

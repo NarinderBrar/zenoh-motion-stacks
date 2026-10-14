@@ -246,7 +246,7 @@ public:
     return ready_.wait_for(lock, timeout, [&] {
       if (!lastJointStates_ || !lastJointStates_->contains("position") ||
           !lastJointStates_->at("position").is_array() ||
-          lastJointStates_->at("position").size() != 2) {
+          lastJointStates_->at("position").size() < 2) {
         return false;
       }
       return std::abs(lastJointStates_->at("position").at(0).get<double>() -
@@ -481,7 +481,7 @@ TEST(Integration, ManipulationJointWorkflow) {
       "manipulation-integration/" + std::to_string(getpid());
   TemporaryManipulationConfig config(prefix, repository);
   Process mock(executableDirectory / "zms_mock_robot",
-               {prefix, "--joints", "joint_1,joint_2"});
+               {prefix, "--joints", "joint_1,joint_2,gripper"});
   Process stack(executableDirectory / "zms_manipulation",
                 {"--config", config.path().string()});
   zenoh::Session session(zenoh::Config::create_default());

@@ -33,10 +33,20 @@ if [[ "$prefix" != /usr/local ]]; then
     exit 2
 fi
 
+dependency_file="$repository_dir/cmake/dependencies.cmake"
+dependency_version() {
+    local value
+    value=$(sed -n "s/^set(ZMS_$1_VERSION \([0-9][0-9.]*\))\$/\1/p" "$dependency_file")
+    if [[ -z "$value" ]]; then
+        printf 'Cannot read ZMS_%s_VERSION from %s\n' "$1" "$dependency_file" >&2
+        exit 1
+    fi
+    printf '%s' "$value"
+}
 declare -A versions
-while IFS='=' read -r name version; do
-    versions["$name"]=$version
-done < <(cmake -P "$repository_dir/cmake/print_versions.cmake" 2>&1)
+versions[json]=$(dependency_version JSON)
+versions[zenohc]=$(dependency_version ZENOHC)
+versions[zenohcxx]=$(dependency_version ZENOHCXX)
 
 packages=(build-essential cmake ninja-build libeigen3-dev liburdfdom-dev libompl-dev nlohmann-json3-dev libgtest-dev libzenohc-dev libzenohcpp-dev)
 declare -A requirements=([nlohmann-json3-dev]="${versions[json]}" [libzenohc-dev]="${versions[zenohc]}" [libzenohcpp-dev]="${versions[zenohcxx]}")

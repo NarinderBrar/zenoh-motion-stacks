@@ -2,7 +2,7 @@
 
 Run `zms_navigation --check-config <file>` before starting a stack. Unknown fields and missing required fields are errors. `--version` prints stack, contract, and configuration versions as JSON.
 
-The top level requires integer `version: 1` and string `robot_prefix`. Optional fields are `control_rate_hz` (1 to 200, default 20), `odom_timeout_s` (positive seconds, default 1), `scan_timeout_s` (positive seconds, default 1), `footprint_radius` (positive meters, default 0.25), `obstacle_margin` (positive meters, default 0.1), and `limits`. Limit fields are positive finite numbers:
+The top level requires integer `version: 1` and string `robot_prefix`, which may be empty for unprefixed keys. Optional fields are `control_rate_hz` (1 to 200, default 20), `odom_timeout_s` (positive seconds, default 1), `scan_timeout_s` (positive seconds, default 1), `footprint_radius` (positive meters, default 0.25), `obstacle_margin` (positive meters, default 0.1), `progress_timeout_s` (positive seconds, default 15; a command fails with `no_progress` when the robot gets no closer to its current waypoint, by distance or heading, for this long), and `limits`. Limit fields are positive finite numbers:
 
 | Field | Default | Unit |
 |---|---:|---|
