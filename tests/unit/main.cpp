@@ -6,6 +6,7 @@
 #include <zms/manipulation/Planner.hpp>
 #include <zms/navigation/GridPlanner.hpp>
 #include <zms/navigation/LocalPlanner.hpp>
+#include <zms/navigation/Localization.hpp>
 #include <zms/navigation/Navigation.hpp>
 #include <zms/navigation/PlanningWorker.hpp>
 
@@ -332,6 +333,96 @@ TEST(Planner, FindsCollisionFreePathAroundObstacle) {
       {0.0, -1.9, -2.0, 0.0, 0.0, 0.0}, goal, model.joints(), valid, options));
 }
 
+TEST(Planner, CartesianPathFollowsStraightLine) {
+  const auto chain = zms::manipulation::KinematicChain::fromUrdf(
+      mobileManipulator, "base_link", "tool_flange");
+  const auto model = zms::manipulation::JointModel::fromUrdf(
+      mobileManipulator, "base_link", "tool_flange");
+  auto collision = zms::manipulation::CollisionModel::fromUrdf(
+      mobileManipulator, "base_link", chain, armHome(), 0.0);
+  const auto valid = [&](const std::vector<double> &q) {
+    return !collision.inCollision(q);
+  };
+  const std::vector<double> start = {0.8, 0.3, 0.5, 0.5, 0.4, 0.3};
+  const auto origin = chain.forward(start);
+  Eigen::Isometry3d target = origin;
+  target.translation() += Eigen::Vector3d(0.0, 0.0, 0.05);
+  const auto line = zms::manipulation::planCartesianPath(chain, start, target,
+                                                         model.joints(), valid);
+  EXPECT_DOUBLE_EQ(line.fraction, 1.0);
+  ASSERT_GE(line.path.size(), 5U);
+  for (const auto &q : line.path) {
+    const auto pose = chain.forward(q);
+    const Eigen::Vector3d offset = pose.translation() - origin.translation();
+    EXPECT_LT(std::hypot(offset.x(), offset.y()), 0.004);
+    EXPECT_LT(
+        zms::manipulation::orientationError(origin.linear(), pose.linear())
+            .norm(),
+        0.02);
+  }
+  zms::manipulation::EnvironmentObject block;
+  block.name = "block";
+  block.size = Eigen::Vector3d(0.3, 0.3, 0.01);
+  block.pose.translation() =
+      origin.translation() + Eigen::Vector3d(0.0, 0.0, 0.035);
+  collision.setEnvironment({block});
+  const auto blocked = zms::manipulation::planCartesianPath(
+      chain, start, target, model.joints(), valid);
+  EXPECT_LT(blocked.fraction, 1.0);
+}
+
+TEST(Planner, ContinuousTimingIsFasterAndWithinLimits) {
+  const auto model = zms::manipulation::JointModel::fromUrdf(
+      mobileManipulator, "base_link", "tool_flange");
+  zms::manipulation::JointPath path;
+  for (int step = 0; step <= 50; ++step) {
+    const double ratio = step / 50.0;
+    path.push_back({ratio * 1.0, ratio * 0.5, -ratio * 0.4, 0.0, 0.0, 0.0});
+  }
+  const double acceleration = 1.5;
+  const auto continuous = zms::manipulation::timeParameterizeContinuous(
+      path, model.joints(), acceleration);
+  const auto stopAndGo =
+      zms::manipulation::timeParameterize(path, model.joints(), acceleration);
+  EXPECT_LT(continuous.duration(), stopAndGo.duration() / 3.0);
+  EXPECT_EQ(continuous.sample(continuous.duration() + 1.0), path.back());
+  const double dt = 0.001;
+  std::vector<double> previous = continuous.sample(0.0);
+  std::vector<double> previousVelocity(6, 0.0);
+  for (double t = dt; t <= continuous.duration(); t += dt) {
+    const auto current = continuous.sample(t);
+    for (std::size_t joint = 0; joint < current.size(); ++joint) {
+      const double velocity = (current[joint] - previous[joint]) / dt;
+      EXPECT_LE(std::abs(velocity), model.joints()[joint].velocity + 1e-3);
+      EXPECT_LE(std::abs(velocity - previousVelocity[joint]) / dt,
+                acceleration + 0.05);
+      previousVelocity[joint] = velocity;
+    }
+    previous = current;
+  }
+}
+
+TEST(Contract, RoundTripsGripperAndCartesianTargets) {
+  const zms::contract::GripperCommand open{"g1", "client", "open", {}};
+  EXPECT_EQ(zms::contract::parseGripper(zms::contract::toJson(open)).action,
+            "open");
+  const zms::contract::GripperCommand position{
+      "g2", "client", "position", {0.01, 0.02}};
+  EXPECT_EQ(
+      zms::contract::parseGripper(zms::contract::toJson(position)).positions,
+      position.positions);
+  EXPECT_THROW(zms::contract::parseGripper({{"contract", 1},
+                                            {"command_id", "g3"},
+                                            {"client_id", "c"},
+                                            {"command", "squeeze"}}),
+               std::invalid_argument);
+  zms::contract::PoseTarget pose;
+  pose.cartesian = true;
+  const auto parsed = zms::contract::parseTarget(
+      zms::contract::toJson(zms::contract::Target{"t", "c", pose}));
+  EXPECT_TRUE(std::get<zms::contract::PoseTarget>(parsed.value).cartesian);
+}
+
 TEST(Planner, TrajectoryIsSynchronizedAndWithinLimits) {
   const auto model = zms::manipulation::JointModel::fromUrdf(
       mobileManipulator, "base_link", "tool_flange");
@@ -469,6 +560,98 @@ TEST(LocalPlanner, LookaheadSkipsNearbyRoutePoints) {
       {0.1, 0.0, 0.0}, {0.2, 0.0, 0.0}, {0.6, 0.0, 0.0}, {1.0, 0.0, 0.0}};
   EXPECT_EQ(zms::navigation::lookaheadIndex({0.0, 0.0, 0.0}, route, 0, 0.4), 2);
   EXPECT_EQ(zms::navigation::lookaheadIndex({0.9, 0.0, 0.0}, route, 0, 0.4), 3);
+}
+
+namespace {
+
+zms::navigation::OccupancyGrid roomMap() {
+  zms::navigation::OccupancyGrid grid;
+  grid.width = 160;
+  grid.height = 120;
+  grid.resolution = 0.05;
+  grid.cells.assign(static_cast<std::size_t>(grid.width * grid.height), 0);
+  for (int y = 0; y < grid.height; ++y) {
+    for (int x = 0; x < grid.width; ++x) {
+      const bool border =
+          x < 2 || y < 2 || x >= grid.width - 2 || y >= grid.height - 2;
+      const bool box = x >= 90 && x < 100 && y >= 30 && y < 50;
+      if (border || box) {
+        grid.cells[static_cast<std::size_t>(y * grid.width + x)] = 100;
+      }
+    }
+  }
+  return grid;
+}
+
+std::vector<zms::navigation::Point2>
+simulateScan(const zms::navigation::OccupancyGrid &grid,
+             const zms::navigation::Pose &pose) {
+  std::vector<zms::navigation::Point2> points;
+  for (int beam = 0; beam < 180; ++beam) {
+    const double angle =
+        -std::numbers::pi + beam * 2.0 * std::numbers::pi / 180;
+    for (double range = 0.1; range < 8.0; range += 0.02) {
+      const double x = pose.x + range * std::cos(pose.yaw + angle);
+      const double y = pose.y + range * std::sin(pose.yaw + angle);
+      const int cx = static_cast<int>(std::floor(x / grid.resolution));
+      const int cy = static_cast<int>(std::floor(y / grid.resolution));
+      if (cx < 0 || cy < 0 || cx >= grid.width || cy >= grid.height ||
+          grid.cells[static_cast<std::size_t>(cy * grid.width + cx)] >= 50) {
+        points.push_back({range * std::cos(angle), range * std::sin(angle)});
+        break;
+      }
+    }
+  }
+  return points;
+}
+
+}
+
+TEST(Localization, ComposeAndInverseRoundTrip) {
+  const zms::navigation::Pose a{1.0, 2.0, 0.7};
+  const zms::navigation::Pose b{-0.3, 0.5, -1.2};
+  const auto back = zms::navigation::compose(zms::navigation::inverse(a),
+                                             zms::navigation::compose(a, b));
+  EXPECT_NEAR(back.x, b.x, 1e-12);
+  EXPECT_NEAR(back.y, b.y, 1e-12);
+  EXPECT_NEAR(back.yaw, b.yaw, 1e-12);
+}
+
+TEST(Localization, LikelihoodFieldMeasuresDistanceToWalls) {
+  const auto grid = roomMap();
+  const zms::navigation::LikelihoodField field(grid, 2.0);
+  EXPECT_NEAR(field.distance(0.05, 1.0), 0.0, 1e-6);
+  EXPECT_NEAR(field.distance(1.0, 3.0), 0.9, 0.06);
+  EXPECT_NEAR(field.distance(-5.0, -5.0), 2.0, 1e-6);
+}
+
+TEST(Localization, CorrectsDriftingOdometry) {
+  for (unsigned seed = 1; seed <= 5; ++seed) {
+    SCOPED_TRACE(seed);
+    auto grid = std::make_shared<zms::navigation::OccupancyGrid>(roomMap());
+    zms::navigation::LocalizationConfig config;
+    config.seed = seed;
+    zms::navigation::ParticleFilter filter(config);
+    filter.setMap(grid);
+    zms::navigation::Pose truth{1.5, 1.0, 0.0};
+    zms::navigation::Pose odom{0.0, 0.0, 0.0};
+    filter.update(odom, {});
+    filter.initialize(truth);
+    for (int step = 0; step < 120; ++step) {
+      const double distance = 0.05;
+      const double turn = step >= 50 && step < 70 ? 0.08 : 0.0;
+      truth = zms::navigation::compose(truth, {distance, 0.0, turn});
+      odom = zms::navigation::compose(odom, {distance * 1.1, 0.0, turn + 0.01});
+      filter.update(odom, simulateScan(*grid, truth));
+    }
+    const auto drifted = filter.toMap(odom);
+    const auto naive = zms::navigation::compose({1.5, 1.0, 0.0}, odom);
+    EXPECT_GT(std::hypot(naive.x - truth.x, naive.y - truth.y), 0.5);
+    EXPECT_LT(std::hypot(drifted.x - truth.x, drifted.y - truth.y), 0.15);
+    EXPECT_LT(
+        std::abs(zms::navigation::normalizeAngle(drifted.yaw - truth.yaw)),
+        0.1);
+  }
 }
 
 TEST(Navigation, ReachesWaypointAndLimitsAcceleration) {

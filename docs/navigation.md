@@ -16,4 +16,12 @@ With `avoidance.enabled` (the default) and a `scan` stream, the stack drives aro
 
 When the straight line to the current target keeps that clearance, the stack uses the waypoint follower instead, so open stretches and the final approach behave as before. Turning to a waypoint heading also uses the follower. When no candidate moves the robot for `avoidance.recovery_after_s`, the stack re-plans the remaining route through the map with the scan points marked as occupied (when a map is available), turns in place toward the side with fewer obstacles for 2 seconds, then backs up up to 0.2 m when the rear is clear. Feedback reports `blocked` and `recovery` (`none`, `rotate`, or `backup`). `progress_timeout_s` still ends a command that makes no progress. With `avoidance.enabled` false the stack keeps the earlier behavior and stops for close forward returns, reporting `obstacle_stopped`.
 
-The `features` field then lists `waypoint_route`, `differential_drive`, `grid_astar`, `local_avoidance`, `obstacle_replanning`, and `recovery_behaviors`. Not yet implemented: localization against a map, costmap layers beyond the latest scan, omnidirectional and car-like drive models, and behavior trees.
+The `features` field then lists `waypoint_route`, `differential_drive`, `grid_astar`, `local_avoidance`, `obstacle_replanning`, and `recovery_behaviors`.
+
+`scan_offset` gives the scanner pose in the base frame (`x`, `y` in meters, `yaw` in radians). Scan points are moved into the base frame before obstacle checks, avoidance, and localization.
+
+## Localization
+
+With `localization.enabled`, the stack runs a particle filter against the `map` stream. Particles move with the odometry change using the standard odometry motion model (all four noise terms 0.2), are weighted against a likelihood field (distance from each scan point to the nearest occupied cell, 0.2 m spread, 5 % random returns, 60 beams), and are resampled when the effective particle count falls below half. The filter updates after 0.05 m or 0.05 rad of motion. Control, goals, avoidance, and map re-planning then use the map-frame pose, so drifting odometry is corrected. The start pose comes from `localization.initial_pose` or a put on `localization/initial_pose` (`{"contract":1,"x":…,"y":…,"yaw":…}`). The estimate is published on `localization/pose` at 5 Hz with a `spread` field (meters), status reports `localized`, and `features` adds `particle_filter_localization`. Global localization without an initial pose is not implemented.
+
+Not yet implemented: costmap layers beyond the latest scan, omnidirectional and car-like drive models, and behavior trees.

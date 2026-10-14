@@ -129,7 +129,9 @@ int main(int argc, char **argv) {
           "usage: zms_cli <robot-prefix> <client-id> goal <command-id> <x> <y> "
           "<yaw> | cancel <command-id> | status | joint-target <command-id> "
           "<names> <positions> | pose-target <command-id> <x> <y> <z> "
-          "<qx> <qy> <qz> <qw> | cancel-manipulation <command-id> | "
+          "<qx> <qy> <qz> <qw> | cartesian-target <command-id> <x> <y> <z> "
+          "<qx> <qy> <qz> <qw> | gripper <command-id> open|close|<positions> | "
+          "cancel-manipulation <command-id> | "
           "manipulation-status | mock-joints <names> <positions> | watch "
           "<navigation|manipulation> <command-id> <timeout-s>");
     }
@@ -169,6 +171,26 @@ int main(int argc, char **argv) {
       response =
           query(session, zms::contract::key(prefix, "manipulation/target"),
                 zms::contract::toJson(target));
+    } else if (command == "cartesian-target" && argc == 12) {
+      auto pose = zms::contract::PoseTarget{
+          number(argv[5]), number(argv[6]),  number(argv[7]), number(argv[8]),
+          number(argv[9]), number(argv[10]), number(argv[11])};
+      pose.cartesian = true;
+      response =
+          query(session, zms::contract::key(prefix, "manipulation/target"),
+                zms::contract::toJson(
+                    zms::contract::Target{argv[4], clientId, pose}));
+    } else if (command == "gripper" && argc == 6) {
+      zms::contract::GripperCommand gripper{argv[4], clientId, argv[5], {}};
+      if (gripper.action != "open" && gripper.action != "close") {
+        gripper.action = "position";
+        for (const auto &position : split(argv[5])) {
+          gripper.positions.push_back(number(position.c_str()));
+        }
+      }
+      response =
+          query(session, zms::contract::key(prefix, "manipulation/gripper"),
+                zms::contract::toJson(gripper));
     } else if (command == "cancel-manipulation" && argc == 5) {
       response = query(
           session, zms::contract::key(prefix, "manipulation/cancel"),

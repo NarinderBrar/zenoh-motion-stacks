@@ -12,8 +12,8 @@
 #include <csignal>
 #include <deque>
 #include <filesystem>
-#include <limits>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -118,11 +118,12 @@ public:
     path_ = std::filesystem::temp_directory_path() /
             ("zms-navigation-" + std::to_string(getpid()) + ".json");
     std::ofstream output(path_);
-    output << Json{{"version", 1},
-                   {"robot_prefix", prefix},
-                   {"odom_timeout_s", 0.7},
-                   {"scan_timeout_s", 0.7}}
-                  .dump();
+    output << Json{
+        {"version", 1},
+        {"robot_prefix", prefix},
+        {"odom_timeout_s", 0.7},
+        {"scan_timeout_s",
+         0.7}}.dump();
     if (!output) {
       throw std::runtime_error("could not write test configuration");
     }
@@ -514,6 +515,105 @@ TEST(Integration, NavigationAvoidsObstacleOnStraightRoute) {
   EXPECT_GT(observations.closestApproach(0.9, 0.0), 0.12 + 0.25);
 }
 
+TEST(Integration, NavigationLocalizesWithDriftingOdometry) {
+  const auto executableDirectory =
+      std::filesystem::canonical("/proc/self/exe").parent_path();
+  const std::string prefix = "localize-integration/" + std::to_string(getpid());
+  const auto configPath =
+      std::filesystem::temp_directory_path() /
+      ("zms-localize-" + std::to_string(getpid()) + ".json");
+  {
+    std::ofstream output(configPath);
+    output << Json{{"version", 1},
+                   {"robot_prefix", prefix},
+                   {"odom_timeout_s", 0.7},
+                   {"scan_timeout_s", 0.7},
+                   {"progress_timeout_s", 30.0},
+                   {"localization",
+                    {{"enabled", true},
+                     {"initial_pose", {{"x", 1.0}, {"y", 1.0}, {"yaw", 0.0}}}}}}
+                  .dump();
+  }
+  constexpr double width = 6.0;
+  constexpr double height = 4.0;
+  constexpr double resolution = 0.05;
+  const int cellsX = static_cast<int>(width / resolution);
+  const int cellsY = static_cast<int>(height / resolution);
+  Json data = Json::array();
+  for (int y = 0; y < cellsY; ++y) {
+    for (int x = 0; x < cellsX; ++x) {
+      const bool border =
+          x == 0 || y == 0 || x == cellsX - 1 || y == cellsY - 1;
+      const bool box = x >= 60 && x < 70 && y >= 50 && y < 60;
+      data.push_back(border || box ? 100 : 0);
+    }
+  }
+  const Json map = {{"contract", 1},
+                    {"width", cellsX},
+                    {"height", cellsY},
+                    {"resolution", resolution},
+                    {"origin", {{"x", 0.0}, {"y", 0.0}, {"yaw", 0.0}}},
+                    {"data", data}};
+  Process mock(executableDirectory / "zms_mock_robot", {prefix,
+                                                        "--start",
+                                                        "1.0,1.0,0.0",
+                                                        "--odom-scale",
+                                                        "1.1",
+                                                        "--odom-yaw-drift",
+                                                        "0.03",
+                                                        "--wall",
+                                                        "0.05,0.05,5.95,0.05",
+                                                        "--wall",
+                                                        "5.95,0.05,5.95,3.95",
+                                                        "--wall",
+                                                        "5.95,3.95,0.05,3.95",
+                                                        "--wall",
+                                                        "0.05,3.95,0.05,0.05",
+                                                        "--wall",
+                                                        "3.0,2.5,3.5,2.5",
+                                                        "--wall",
+                                                        "3.5,2.5,3.5,3.0",
+                                                        "--wall",
+                                                        "3.5,3.0,3.0,3.0",
+                                                        "--wall",
+                                                        "3.0,3.0,3.0,2.5"});
+  Process stack(executableDirectory / "zms_navigation",
+                {"--config", configPath.string()});
+  zenoh::Session session(zenoh::Config::create_default());
+  Observations observations;
+  Observations truth;
+  auto results = session.declare_subscriber(
+      zenoh::KeyExpr(zms::contract::key(prefix, "navigation/result")),
+      [&](const zenoh::Sample &sample) { observations.result(sample); }, [] {});
+  auto truthSubscriber = session.declare_subscriber(
+      zenoh::KeyExpr(zms::contract::key(prefix, "ground_truth")),
+      [&](const zenoh::Sample &sample) { truth.odometry(sample); }, [] {});
+  waitForStack(session, prefix, "navigation");
+  ASSERT_TRUE(truth.waitForOdom(5s));
+  std::jthread mapPublisher([&](std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      zms::contract::publish(session, zms::contract::key(prefix, "map"), map);
+      std::this_thread::sleep_for(500ms);
+    }
+  });
+  std::this_thread::sleep_for(1500ms);
+  const auto accepted = zms::contract::query(
+      session, zms::contract::key(prefix, "navigation/goal"),
+      zms::contract::toJson(
+          zms::contract::Goal{"localized",
+                              "integration-client",
+                              {{4.5, 1.5, 0.0}, {4.5, 3.2, 0.0}}}));
+  ASSERT_TRUE(accepted.at("accepted")) << accepted.dump();
+  const auto result = observations.waitForResult("localized", 90s);
+  mapPublisher.request_stop();
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->at("state"), "succeeded") << result->dump();
+  const auto finalPose = truth.latestOdom();
+  EXPECT_NEAR(finalPose.at("x").get<double>(), 4.5, 0.3);
+  EXPECT_NEAR(finalPose.at("y").get<double>(), 3.2, 0.3);
+  std::filesystem::remove(configPath);
+}
+
 TEST(Integration, ManipulationJointWorkflow) {
   const auto executableDirectory =
       std::filesystem::canonical("/proc/self/exe").parent_path();
@@ -571,6 +671,12 @@ TEST(Integration, ManipulationJointWorkflow) {
                                "pose", "owner", zms::contract::PoseTarget{}}));
   EXPECT_FALSE(pose.at("accepted"));
   EXPECT_EQ(pose.at("reason"), "unreachable");
+  const auto noGripper = zms::contract::query(
+      session, zms::contract::key(prefix, "manipulation/gripper"),
+      zms::contract::toJson(
+          zms::contract::GripperCommand{"grip", "owner", "close", {}}));
+  EXPECT_FALSE(noGripper.at("accepted"));
+  EXPECT_EQ(noGripper.at("reason"), "unsupported");
 
   zms::contract::PoseTarget reachable;
   reachable.x = 0.3 * std::cos(0.4);
@@ -578,10 +684,10 @@ TEST(Integration, ManipulationJointWorkflow) {
   reachable.z = 0.2;
   reachable.qz = std::sin(0.05);
   reachable.qw = std::cos(0.05);
-  const auto posed = zms::contract::query(
-      session, targetKey,
-      zms::contract::toJson(
-          zms::contract::Target{"pose-goal", "owner", reachable}));
+  const auto posed =
+      zms::contract::query(session, targetKey,
+                           zms::contract::toJson(zms::contract::Target{
+                               "pose-goal", "owner", reachable}));
   ASSERT_TRUE(posed.at("accepted")) << posed.dump();
   const auto posedResult = observations.waitForResult("pose-goal", 5s);
   ASSERT_TRUE(posedResult.has_value());
@@ -614,6 +720,62 @@ TEST(Integration, ManipulationJointWorkflow) {
   const auto shutdown = observations.waitForResult("shutdown-goal", 3s);
   ASSERT_TRUE(shutdown.has_value());
   EXPECT_EQ(shutdown->at("reason"), "shutdown");
+}
+
+TEST(Integration, GripperOpensAndCloses) {
+  const auto executableDirectory =
+      std::filesystem::canonical("/proc/self/exe").parent_path();
+  const auto repository = executableDirectory.parent_path().parent_path();
+  const std::string prefix = "gripper-integration/" + std::to_string(getpid());
+  const auto configPath = std::filesystem::temp_directory_path() /
+                          ("zms-gripper-" + std::to_string(getpid()) + ".json");
+  {
+    std::ofstream output(configPath);
+    output << Json{{"version", 1},
+                   {"robot_prefix", prefix},
+                   {"urdf_path",
+                    (repository / "config/examples/mobile_manipulator.urdf")
+                        .string()},
+                   {"base_frame", "base_link"},
+                   {"eef_frame", "tool_flange"},
+                   {"gripper",
+                    {{"joints", {"left_finger_joint", "right_finger_joint"}},
+                     {"open", {0.035, 0.035}},
+                     {"closed", {0.0, 0.0}}}}}
+                  .dump();
+  }
+  Process mock(executableDirectory / "zms_mock_robot",
+               {prefix, "--joints",
+                "arm_base_joint,upper_arm_joint,forearm_joint,wrist_roll_joint,"
+                "wrist_pitch_joint,tool_flange_joint,left_finger_joint,"
+                "right_finger_joint"});
+  Process stack(executableDirectory / "zms_manipulation",
+                {"--config", configPath.string()});
+  zenoh::Session session(zenoh::Config::create_default());
+  Observations observations;
+  auto results = session.declare_subscriber(
+      zenoh::KeyExpr(zms::contract::key(prefix, "manipulation/result")),
+      [&](const zenoh::Sample &sample) { observations.result(sample); }, [] {});
+  waitForStack(session, prefix, "manipulation");
+  std::this_thread::sleep_for(1s);
+  const auto gripperKey = zms::contract::key(prefix, "manipulation/gripper");
+  const auto send = [&](const std::string &id, const std::string &client,
+                        const std::string &action) {
+    return zms::contract::query(
+        session, gripperKey,
+        zms::contract::toJson(
+            zms::contract::GripperCommand{id, client, action, {}}));
+  };
+  ASSERT_TRUE(send("open", "owner", "open").at("accepted"));
+  EXPECT_FALSE(send("steal", "other", "close").at("accepted"));
+  const auto opened = observations.waitForResult("open", 10s);
+  ASSERT_TRUE(opened.has_value());
+  EXPECT_EQ(opened->at("state"), "succeeded") << opened->dump();
+  ASSERT_TRUE(send("close", "owner", "close").at("accepted"));
+  const auto closed = observations.waitForResult("close", 10s);
+  ASSERT_TRUE(closed.has_value());
+  EXPECT_EQ(closed->at("state"), "succeeded") << closed->dump();
+  std::filesystem::remove(configPath);
 }
 
 TEST(Integration, ManipulationTrackingFailure) {

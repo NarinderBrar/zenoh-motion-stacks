@@ -51,6 +51,9 @@ struct Config {
   double ikOrientationTolerance = 0.02;
   double settleTimeoutSeconds = 2.0;
   std::vector<zms::manipulation::EnvironmentObject> environment;
+  std::vector<std::string> gripperJoints;
+  std::vector<double> gripperOpen;
+  std::vector<double> gripperClosed;
 };
 
 double positive(const Json &document, const char *field, double fallback) {
@@ -170,7 +173,7 @@ Config loadConfig(const std::string &path) {
       "version",          "robot_prefix",   "urdf_path",
       "base_frame",       "eef_frame",      "control_rate_hz",
       "state_timeout_s",  "tracking_error", "position_tolerance",
-      "max_acceleration", "planning"};
+      "max_acceleration", "planning",       "gripper"};
   for (auto item = document.begin(); item != document.end(); ++item) {
     if (!fields.contains(item.key())) {
       throw std::invalid_argument("config." + item.key() + " is unknown");
@@ -249,13 +252,33 @@ Config loadConfig(const std::string &path) {
       }
     }
   }
+  if (document.contains("gripper")) {
+    const auto &gripper = document.at("gripper");
+    knownFields(gripper, {"joints", "open", "closed"}, "config.gripper");
+    if (!gripper.contains("joints") || !gripper.at("joints").is_array() ||
+        gripper.at("joints").empty() || gripper.at("joints").size() > 16) {
+      throw std::invalid_argument(
+          "config.gripper.joints must hold 1 to 16 joint names");
+    }
+    for (const auto &name : gripper.at("joints")) {
+      if (!name.is_string() || name.get<std::string>().empty()) {
+        throw std::invalid_argument(
+            "config.gripper.joints must hold nonempty strings");
+      }
+      result.gripperJoints.push_back(name.get<std::string>());
+    }
+    result.gripperOpen = numberArray(
+        gripper, "open", result.gripperJoints.size(), "config.gripper");
+    result.gripperClosed = numberArray(
+        gripper, "closed", result.gripperJoints.size(), "config.gripper");
+  }
   return result;
 }
 
 enum class Claim { Waiting, Handled, Abandoned };
 
 struct Request {
-  enum class Kind { Target, Cancel } kind;
+  enum class Kind { Target, Cancel, Gripper } kind;
   Json payload;
   std::promise<Json> reply;
   std::atomic<Claim> claim = Claim::Waiting;
@@ -265,6 +288,7 @@ struct Mailbox {
   std::mutex mutex;
   std::deque<std::shared_ptr<Request>> requests;
   std::optional<std::pair<std::vector<double>, Clock::time_point>> state;
+  std::optional<std::pair<std::vector<double>, Clock::time_point>> gripperState;
   Json status = {{"contract", 1}, {"state", "idle"}};
 };
 
@@ -282,6 +306,14 @@ orderedState(const Json &payload, const zms::manipulation::JointModel &model) {
       payload.at("position").get<std::vector<double>>());
 }
 
+void sendNamedJoints(zenoh::Session &session, const std::string &key,
+                     const std::vector<std::string> &names,
+                     const std::vector<double> &positions) {
+  zms::contract::publish(
+      session, key,
+      {{"contract", 1}, {"name", names}, {"position", positions}});
+}
+
 void sendJoints(zenoh::Session &session, const std::string &key,
                 const zms::manipulation::JointModel &model,
                 const std::vector<double> &positions) {
@@ -297,6 +329,7 @@ void sendJoints(zenoh::Session &session, const std::string &key,
 struct Planning {
   zms::manipulation::KinematicChain chain;
   zms::manipulation::CollisionModel collision;
+  std::vector<zms::manipulation::JointLimit> gripper;
 };
 
 Planning makePlanning(const Config &config,
@@ -311,7 +344,22 @@ Planning makePlanning(const Config &config,
       config.urdfPath, config.baseFrame, chain, reference,
       config.collisionPadding);
   collision.setEnvironment(config.environment);
-  return {std::move(chain), std::move(collision)};
+  std::vector<zms::manipulation::JointLimit> gripper;
+  if (!config.gripperJoints.empty()) {
+    gripper = zms::manipulation::JointModel::limitsFor(config.urdfPath,
+                                                       config.gripperJoints);
+    for (std::size_t index = 0; index < gripper.size(); ++index) {
+      for (const double value :
+           {config.gripperOpen[index], config.gripperClosed[index]}) {
+        if (value < gripper[index].lower || value > gripper[index].upper) {
+          throw std::invalid_argument("config.gripper position for " +
+                                      gripper[index].name +
+                                      " is outside its URDF limits");
+        }
+      }
+    }
+  }
+  return {std::move(chain), std::move(collision), std::move(gripper)};
 }
 
 Eigen::Isometry3d toIsometry(const zms::contract::PoseTarget &pose) {
@@ -351,6 +399,8 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
       }
       if (kind == Request::Kind::Target) {
         zms::contract::parseTarget(*payload);
+      } else if (kind == Request::Kind::Gripper) {
+        zms::contract::parseGripper(*payload);
       } else {
         zms::contract::parseCancel(*payload);
       }
@@ -380,26 +430,57 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
       session, targetKey, callback(Request::Kind::Target));
   auto cancelQueryable = zms::contract::declareJsonQueryable(
       session, cancelKey, callback(Request::Kind::Cancel));
+  auto gripperQueryable = zms::contract::declareJsonQueryable(
+      session, endpoint("manipulation/gripper"),
+      callback(Request::Kind::Gripper));
   auto statusQueryable = zms::contract::declareJsonQueryable(
       session, statusKey, [&](const std::optional<Json> &) {
         std::lock_guard lock(mailbox.mutex);
         auto status = mailbox.status;
         status["stack_version"] = "0.2.0";
-        status["features"] =
-            Json::array({"urdf_joint_limits", "joint_target", "pose_target",
-                         "self_collision", "environment_collision",
-                         "rrt_connect", "synchronized_trajectory"});
+        status["features"] = Json::array(
+            {"urdf_joint_limits", "joint_target", "pose_target",
+             "self_collision", "environment_collision", "rrt_connect",
+             "synchronized_trajectory", "cartesian_path"});
+        if (!planning.gripper.empty()) {
+          status["features"].push_back("gripper");
+        }
         return status;
       });
   auto subscriber = session.declare_subscriber(
       zenoh::KeyExpr(endpoint("joint_states")),
       [&](const zenoh::Sample &sample) {
         try {
-          const auto state = orderedState(
-              zms::contract::parseJson(sample.get_payload()), model);
+          const auto payload = zms::contract::parseJson(sample.get_payload());
+          const auto state = orderedState(payload, model);
+          std::optional<std::vector<double>> gripperState;
+          if (!planning.gripper.empty() && payload.contains("name") &&
+              payload.contains("position")) {
+            const auto names =
+                payload.at("name").get<std::vector<std::string>>();
+            const auto positions =
+                payload.at("position").get<std::vector<double>>();
+            std::vector<double> ordered;
+            for (const auto &joint : planning.gripper) {
+              const auto found =
+                  std::find(names.begin(), names.end(), joint.name);
+              const auto index =
+                  static_cast<std::size_t>(std::distance(names.begin(), found));
+              if (found == names.end() || index >= positions.size()) {
+                break;
+              }
+              ordered.push_back(positions[index]);
+            }
+            if (ordered.size() == planning.gripper.size()) {
+              gripperState = std::move(ordered);
+            }
+          }
+          std::lock_guard lock(mailbox.mutex);
           if (state) {
-            std::lock_guard lock(mailbox.mutex);
             mailbox.state = std::pair{*state, Clock::now()};
+          }
+          if (gripperState) {
+            mailbox.gripperState = std::pair{*gripperState, Clock::now()};
           }
         } catch (const std::exception &) {
         }
@@ -416,6 +497,32 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
   std::vector<double> commanded;
   std::vector<double> goal;
   Clock::time_point lastState;
+  std::optional<zms::contract::GripperCommand> gripperActive;
+  std::vector<std::string> gripperNames;
+  for (const auto &joint : planning.gripper) {
+    gripperNames.push_back(joint.name);
+  }
+  std::vector<double> gripperMeasured;
+  std::vector<double> gripperPrevious;
+  std::vector<double> gripperCommanded;
+  std::vector<double> gripperGoal;
+  Clock::time_point gripperLastState;
+  Clock::time_point gripperStarted;
+  Clock::time_point gripperLastMotion;
+  double gripperDuration = 0.0;
+  const auto finishGripper = [&](zms::contract::CommandState state,
+                                 std::string_view reason,
+                                 std::string_view message, bool grasped) {
+    if (!gripperMeasured.empty()) {
+      sendNamedJoints(session, commandKey, gripperNames, gripperMeasured);
+    }
+    Json result =
+        zms::contract::status(gripperActive->commandId, gripperActive->clientId,
+                              state, reason, message);
+    result["grasped"] = grasped;
+    zms::contract::publish(session, resultKey, result);
+    gripperActive.reset();
+  };
   const auto period = std::chrono::duration<double>(1.0 / config.controlRateHz);
   const auto stale = [&](Clock::time_point now) {
     return measured.empty() ||
@@ -450,14 +557,91 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
         mailbox.state.reset();
         stateUpdated = true;
       }
+      if (mailbox.gripperState) {
+        gripperMeasured = std::move(mailbox.gripperState->first);
+        gripperLastState = mailbox.gripperState->second;
+        mailbox.gripperState.reset();
+      }
     }
     for (const auto &request : requests) {
       auto expected = Claim::Waiting;
       if (!request->claim.compare_exchange_strong(expected, Claim::Handled)) {
         continue;
       }
+      if (request->kind == Request::Kind::Gripper) {
+        const auto command = zms::contract::parseGripper(request->payload);
+        const auto rejectGripper = [&](std::string_view reason,
+                                       std::string message) {
+          request->reply.set_value(zms::contract::rejected(
+              command.commandId, command.clientId, reason, message));
+        };
+        if (planning.gripper.empty()) {
+          rejectGripper("unsupported", "no gripper is configured");
+          continue;
+        }
+        if ((active && active->clientId != command.clientId) ||
+            (gripperActive && gripperActive->clientId != command.clientId)) {
+          rejectGripper("busy", "another client owns the command");
+          continue;
+        }
+        if (gripperMeasured.empty() ||
+            now - gripperLastState >
+                std::chrono::duration<double>(config.stateTimeoutSeconds)) {
+          rejectGripper("state_unavailable",
+                        "gripper joint_states are unavailable or stale");
+          continue;
+        }
+        std::vector<double> target =
+            command.action == "open"    ? config.gripperOpen
+            : command.action == "close" ? config.gripperClosed
+                                        : command.positions;
+        bool valid = target.size() == planning.gripper.size();
+        for (std::size_t index = 0; valid && index < target.size(); ++index) {
+          valid = target[index] >= planning.gripper[index].lower &&
+                  target[index] <= planning.gripper[index].upper;
+        }
+        if (!valid) {
+          rejectGripper("invalid_target",
+                        "gripper positions must match the configured joints "
+                        "and their limits");
+          continue;
+        }
+        if (gripperActive) {
+          finishGripper(zms::contract::CommandState::Cancelled, "replaced",
+                        "replaced by owner", false);
+        }
+        gripperActive = command;
+        gripperGoal = target;
+        gripperCommanded = gripperMeasured;
+        gripperPrevious = gripperMeasured;
+        gripperStarted = now;
+        gripperLastMotion = now;
+        gripperDuration = 0.0;
+        for (std::size_t index = 0; index < target.size(); ++index) {
+          gripperDuration =
+              std::max(gripperDuration,
+                       std::abs(target[index] - gripperMeasured[index]) /
+                           planning.gripper[index].velocity);
+        }
+        request->reply.set_value(
+            zms::contract::accepted(command.commandId, command.clientId));
+        continue;
+      }
       if (request->kind == Request::Kind::Cancel) {
         const auto cancel = zms::contract::parseCancel(request->payload);
+        if (gripperActive && gripperActive->commandId == cancel.commandId) {
+          if (gripperActive->clientId != cancel.clientId) {
+            request->reply.set_value(zms::contract::rejected(
+                cancel.commandId, cancel.clientId, "not_owner",
+                "command belongs to another client"));
+          } else {
+            finishGripper(zms::contract::CommandState::Cancelled, {}, {},
+                          false);
+            request->reply.set_value(
+                zms::contract::accepted(cancel.commandId, cancel.clientId));
+          }
+          continue;
+        }
         if (!active) {
           request->reply.set_value({{"contract", 1}, {"state", "idle"}});
         } else if (active->clientId != cancel.clientId ||
@@ -477,7 +661,8 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
         request->reply.set_value(zms::contract::rejected(
             target.commandId, target.clientId, reason, message));
       };
-      if (active && active->clientId != target.clientId) {
+      if ((active && active->clientId != target.clientId) ||
+          (gripperActive && gripperActive->clientId != target.clientId)) {
         reject("busy", "another client owns the command");
         continue;
       }
@@ -486,6 +671,7 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
         continue;
       }
       std::vector<double> desired;
+      std::optional<zms::manipulation::JointPath> cartesianPath;
       if (const auto *joints =
               std::get_if<zms::contract::JointTarget>(&target.value)) {
         try {
@@ -508,17 +694,32 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
                                 "base_frame and eef_frame");
           continue;
         }
-        zms::manipulation::IkOptions options;
-        options.positionTolerance = config.ikPositionTolerance;
-        options.orientationTolerance = config.ikOrientationTolerance;
-        const auto solution = planning.chain.solveIk(
-            toIsometry(pose), measured, model.joints(), options, valid);
-        if (!solution) {
-          reject("unreachable",
-                 "no collision-free joint solution reaches the pose");
-          continue;
+        if (pose.cartesian) {
+          const auto line = zms::manipulation::planCartesianPath(
+              planning.chain, measured, toIsometry(pose), model.joints(),
+              valid);
+          if (line.fraction < 0.999) {
+            reject("unreachable",
+                   "cartesian path stops at " +
+                       std::to_string(static_cast<int>(line.fraction * 100.0)) +
+                       "% of the line");
+            continue;
+          }
+          cartesianPath = line.path;
+          desired = line.path.back();
+        } else {
+          zms::manipulation::IkOptions options;
+          options.positionTolerance = config.ikPositionTolerance;
+          options.orientationTolerance = config.ikOrientationTolerance;
+          const auto solution = planning.chain.solveIk(
+              toIsometry(pose), measured, model.joints(), options, valid);
+          if (!solution) {
+            reject("unreachable",
+                   "no collision-free joint solution reaches the pose");
+            continue;
+          }
+          desired = *solution;
         }
-        desired = *solution;
       }
       if (active) {
         finish(zms::contract::CommandState::Cancelled, "replaced",
@@ -527,13 +728,66 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
       active = target;
       goal = desired;
       commanded = measured;
-      planGeneration = planner.submit(measured, desired);
+      if (cartesianPath) {
+        trajectory = zms::manipulation::timeParameterizeContinuous(
+            *cartesianPath, model.joints(), config.acceleration);
+        trajectoryStarted = now;
+      } else {
+        planGeneration = planner.submit(measured, desired);
+      }
       Json reply = zms::contract::accepted(target.commandId, target.clientId);
       reply["joints"] = {{"name", Json::array()}, {"position", desired}};
       for (const auto &joint : model.joints()) {
         reply["joints"]["name"].push_back(joint.name);
       }
       request->reply.set_value(reply);
+    }
+    if (gripperActive) {
+      const double elapsed =
+          std::chrono::duration<double>(now - gripperStarted).count();
+      if (now - gripperLastState >
+          std::chrono::duration<double>(config.stateTimeoutSeconds)) {
+        finishGripper(zms::contract::CommandState::Failed, "stale_joint_states",
+                      "gripper execution stopped", false);
+      } else {
+        bool commandDone = true;
+        bool reached = true;
+        bool moved = false;
+        for (std::size_t index = 0; index < gripperGoal.size(); ++index) {
+          const double step =
+              planning.gripper[index].velocity / config.controlRateHz;
+          const double difference =
+              gripperGoal[index] - gripperCommanded[index];
+          gripperCommanded[index] += std::clamp(difference, -step, step);
+          commandDone &=
+              std::abs(gripperGoal[index] - gripperCommanded[index]) < 1e-9;
+          reached &=
+              std::abs(gripperGoal[index] - gripperMeasured[index]) <= 0.002;
+          moved |= std::abs(gripperMeasured[index] - gripperPrevious[index]) >
+                   0.0005;
+        }
+        if (moved) {
+          gripperLastMotion = now;
+          gripperPrevious = gripperMeasured;
+        }
+        sendNamedJoints(session, commandKey, gripperNames, gripperCommanded);
+        if (reached) {
+          finishGripper(zms::contract::CommandState::Succeeded, {}, {}, false);
+        } else if (commandDone &&
+                   now - gripperLastMotion > std::chrono::milliseconds(500)) {
+          if (gripperActive->action == "close") {
+            finishGripper(zms::contract::CommandState::Succeeded, {}, {}, true);
+          } else {
+            finishGripper(zms::contract::CommandState::Failed,
+                          "goal_not_reached",
+                          "gripper stopped before its target", false);
+          }
+        } else if (elapsed > gripperDuration + config.settleTimeoutSeconds) {
+          finishGripper(zms::contract::CommandState::Failed, "goal_not_reached",
+                        "gripper did not settle within settle_timeout_s",
+                        false);
+        }
+      }
     }
     if (active && stale(now)) {
       finish(zms::contract::CommandState::Failed, "stale_joint_states",
@@ -605,6 +859,10 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
     if (next < Clock::now()) {
       next = Clock::now();
     }
+  }
+  if (gripperActive) {
+    finishGripper(zms::contract::CommandState::Failed, "shutdown",
+                  "stack stopped", false);
   }
   if (active) {
     finish(zms::contract::CommandState::Failed, "shutdown", "stack stopped");

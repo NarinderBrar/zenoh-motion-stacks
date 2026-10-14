@@ -119,7 +119,7 @@ Cancel parseCancel(const nlohmann::json &payload) {
 
 Target parseTarget(const nlohmann::json &payload) {
   requireFields(payload, {"contract", "command_id", "client_id", "pose",
-                          "joints", "base_frame", "eef_frame"});
+                          "joints", "base_frame", "eef_frame", "cartesian"});
   requireVersion(payload);
   Target target{identifier(payload, "command_id"),
                 identifier(payload, "client_id"), PoseTarget{}};
@@ -146,11 +146,19 @@ Target parseTarget(const nlohmann::json &payload) {
     if (payload.contains("eef_frame")) {
       value.endEffectorFrame = identifier(payload, "eef_frame");
     }
+    if (payload.contains("cartesian")) {
+      if (!payload.at("cartesian").is_boolean()) {
+        throw std::invalid_argument("cartesian must be a boolean");
+      }
+      value.cartesian = payload.at("cartesian").get<bool>();
+    }
     target.value = std::move(value);
     return target;
   }
-  if (payload.contains("base_frame") || payload.contains("eef_frame")) {
-    throw std::invalid_argument("frame overrides require a pose target");
+  if (payload.contains("base_frame") || payload.contains("eef_frame") ||
+      payload.contains("cartesian")) {
+    throw std::invalid_argument(
+        "frame overrides and cartesian require a pose target");
   }
   const auto &joints = payload.at("joints");
   requireFields(joints, {"name", "position"});
@@ -221,11 +229,60 @@ nlohmann::json toJson(const Target &target) {
     if (!pose->endEffectorFrame.empty()) {
       value["eef_frame"] = pose->endEffectorFrame;
     }
+    if (pose->cartesian) {
+      value["cartesian"] = true;
+    }
   } else {
     const auto &joints = std::get<JointTarget>(target.value);
     value["joints"] = {{"name", joints.names}, {"position", joints.positions}};
   }
   parseTarget(value);
+  return value;
+}
+
+GripperCommand parseGripper(const nlohmann::json &payload) {
+  requireFields(
+      payload, {"contract", "command_id", "client_id", "command", "positions"});
+  requireVersion(payload);
+  GripperCommand command{identifier(payload, "command_id"),
+                         identifier(payload, "client_id"),
+                         {},
+                         {}};
+  if (!payload.contains("command") || !payload.at("command").is_string()) {
+    throw std::invalid_argument("command must be open, close, or position");
+  }
+  command.action = payload.at("command").get<std::string>();
+  if (command.action != "open" && command.action != "close" &&
+      command.action != "position") {
+    throw std::invalid_argument("command must be open, close, or position");
+  }
+  if (command.action == "position") {
+    if (!payload.contains("positions") || !payload.at("positions").is_array() ||
+        payload.at("positions").empty() ||
+        payload.at("positions").size() > 16) {
+      throw std::invalid_argument("positions must hold 1 to 16 numbers");
+    }
+    for (const auto &item : payload.at("positions")) {
+      if (!item.is_number() || !std::isfinite(item.get<double>())) {
+        throw std::invalid_argument("positions must be finite numbers");
+      }
+      command.positions.push_back(item.get<double>());
+    }
+  } else if (payload.contains("positions")) {
+    throw std::invalid_argument("positions require the position command");
+  }
+  return command;
+}
+
+nlohmann::json toJson(const GripperCommand &command) {
+  nlohmann::json value = {{"contract", majorVersion},
+                          {"command_id", command.commandId},
+                          {"client_id", command.clientId},
+                          {"command", command.action}};
+  if (command.action == "position") {
+    value["positions"] = command.positions;
+  }
+  parseGripper(value);
   return value;
 }
 

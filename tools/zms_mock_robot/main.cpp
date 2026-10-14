@@ -29,6 +29,9 @@ struct State {
   double yaw = 0.0;
   double linear = 0.0;
   double angular = 0.0;
+  double odomX = 0.0;
+  double odomY = 0.0;
+  double odomYaw = 0.0;
   std::vector<std::string> jointNames;
   std::vector<double> jointPositions;
   std::vector<double> jointTargets;
@@ -80,11 +83,54 @@ Obstacle parseObstacle(const std::string &value) {
   return obstacle;
 }
 
+struct Wall {
+  double x1 = 0.0;
+  double y1 = 0.0;
+  double x2 = 0.0;
+  double y2 = 0.0;
+};
+
+std::vector<double> parseNumbers(const std::string &value, std::size_t count,
+                                 const char *option) {
+  std::vector<double> numbers;
+  std::istringstream input(value);
+  std::string item;
+  while (std::getline(input, item, ',')) {
+    std::size_t consumed = 0;
+    const double number = std::stod(item, &consumed);
+    if (consumed != item.size() || !std::isfinite(number)) {
+      throw std::invalid_argument(std::string(option) + " has a bad number");
+    }
+    numbers.push_back(number);
+  }
+  if (numbers.size() != count) {
+    throw std::invalid_argument(std::string(option) + " expects " +
+                                std::to_string(count) + " numbers");
+  }
+  return numbers;
+}
+
 double castRay(double x, double y, double angle,
-               const std::vector<Obstacle> &obstacles, double maximum) {
+               const std::vector<Obstacle> &obstacles,
+               const std::vector<Wall> &walls, double maximum) {
   const double dx = std::cos(angle);
   const double dy = std::sin(angle);
   double nearest = maximum;
+  for (const auto &wall : walls) {
+    const double ex = wall.x2 - wall.x1;
+    const double ey = wall.y2 - wall.y1;
+    const double denominator = dx * ey - dy * ex;
+    if (std::abs(denominator) < 1e-12) {
+      continue;
+    }
+    const double wx = wall.x1 - x;
+    const double wy = wall.y1 - y;
+    const double along = (wx * ey - wy * ex) / denominator;
+    const double onWall = (wx * dy - wy * dx) / denominator;
+    if (along > 0.0 && onWall >= 0.0 && onWall <= 1.0) {
+      nearest = std::min(nearest, along);
+    }
+  }
   for (const auto &obstacle : obstacles) {
     const double ox = obstacle.x - x;
     const double oy = obstacle.y - y;
@@ -109,11 +155,18 @@ int main(int argc, char **argv) {
     if (argc < 2) {
       throw std::invalid_argument(
           "usage: zms_mock_robot <robot-prefix> [--joints name1,name2,...] "
-          "[--obstacle x,y,radius]...");
+          "[--obstacle x,y,radius]... [--wall x1,y1,x2,y2]... "
+          "[--start x,y,yaw] [--odom-scale k] [--odom-yaw-drift rad_per_s]");
     }
     const std::string prefix = argv[1];
     std::string jointList;
     std::vector<Obstacle> obstacles;
+    std::vector<Wall> walls;
+    double startX = 0.0;
+    double startY = 0.0;
+    double startYaw = 0.0;
+    double odomScale = 1.0;
+    double odomYawDrift = 0.0;
     for (int index = 2; index < argc; index += 2) {
       if (index + 1 >= argc) {
         throw std::invalid_argument("missing option value");
@@ -123,6 +176,18 @@ int main(int argc, char **argv) {
         jointList = argv[index + 1];
       } else if (option == "--obstacle") {
         obstacles.push_back(parseObstacle(argv[index + 1]));
+      } else if (option == "--wall") {
+        const auto values = parseNumbers(argv[index + 1], 4, "--wall");
+        walls.push_back({values[0], values[1], values[2], values[3]});
+      } else if (option == "--start") {
+        const auto values = parseNumbers(argv[index + 1], 3, "--start");
+        startX = values[0];
+        startY = values[1];
+        startYaw = values[2];
+      } else if (option == "--odom-scale") {
+        odomScale = parseNumbers(argv[index + 1], 1, "--odom-scale")[0];
+      } else if (option == "--odom-yaw-drift") {
+        odomYawDrift = parseNumbers(argv[index + 1], 1, "--odom-yaw-drift")[0];
       } else {
         throw std::invalid_argument("unknown option");
       }
@@ -132,8 +197,12 @@ int main(int argc, char **argv) {
     const auto jointCommandKey = zms::contract::key(prefix, "cmd_joints");
     const auto jointStateKey = zms::contract::key(prefix, "joint_states");
     const auto scanKey = zms::contract::key(prefix, "scan");
+    const auto truthKey = zms::contract::key(prefix, "ground_truth");
     zenoh::Session session(zenoh::Config::create_default());
     State state;
+    state.x = startX;
+    state.y = startY;
+    state.yaw = startYaw;
     if (!jointList.empty()) {
       state.jointNames = parseJointNames(jointList);
       state.jointPositions.resize(state.jointNames.size());
@@ -213,6 +282,7 @@ int main(int argc, char **argv) {
       previous = now;
       nlohmann::json odom;
       nlohmann::json jointStates;
+      nlohmann::json truth;
       {
         std::lock_guard lock(state.mutex);
         if (std::chrono::duration<double>(now - state.lastCommand).count() >
@@ -224,9 +294,20 @@ int main(int argc, char **argv) {
         state.y += std::sin(state.yaw) * state.linear * dt;
         state.yaw = std::remainder(state.yaw + state.angular * dt,
                                    2.0 * std::numbers::pi);
-        odom = {{"contract", 1},          {"x", state.x},
-                {"y", state.y},           {"yaw", state.yaw},
+        const bool moving = state.linear != 0.0 || state.angular != 0.0;
+        state.odomX += std::cos(state.odomYaw) * state.linear * odomScale * dt;
+        state.odomY += std::sin(state.odomYaw) * state.linear * odomScale * dt;
+        state.odomYaw = std::remainder(
+            state.odomYaw +
+                (state.angular + (moving ? odomYawDrift : 0.0)) * dt,
+            2.0 * std::numbers::pi);
+        odom = {{"contract", 1},          {"x", state.odomX},
+                {"y", state.odomY},       {"yaw", state.odomYaw},
                 {"linear", state.linear}, {"angular", state.angular}};
+        truth = {{"contract", 1},
+                 {"x", state.x},
+                 {"y", state.y},
+                 {"yaw", state.yaw}};
         for (std::size_t index = 0; index < state.jointNames.size(); ++index) {
           const double delta =
               state.jointTargets[index] - state.jointPositions[index];
@@ -243,13 +324,14 @@ int main(int argc, char **argv) {
       options.encoding = zenoh::Encoding("application/json");
       session.put(zenoh::KeyExpr(odomKey), zenoh::Bytes(odom.dump()),
                   std::move(options));
+      session.put(zenoh::KeyExpr(truthKey), zenoh::Bytes(truth.dump()));
       if (!state.jointNames.empty()) {
         auto jointOptions = zenoh::Session::PutOptions::create_default();
         jointOptions.encoding = zenoh::Encoding("application/json");
         session.put(zenoh::KeyExpr(jointStateKey),
                     zenoh::Bytes(jointStates.dump()), std::move(jointOptions));
       }
-      if (!obstacles.empty() && ++tick % 2 == 0) {
+      if ((!obstacles.empty() || !walls.empty()) && ++tick % 2 == 0) {
         constexpr int beams = 360;
         constexpr double maximumRange = 8.0;
         nlohmann::json ranges = nlohmann::json::array();
@@ -266,7 +348,7 @@ int main(int argc, char **argv) {
           const double angle =
               -std::numbers::pi + beam * 2.0 * std::numbers::pi / beams;
           const double range =
-              castRay(x, y, yaw + angle, obstacles, maximumRange);
+              castRay(x, y, yaw + angle, obstacles, walls, maximumRange);
           if (range >= maximumRange) {
             ranges.push_back(nullptr);
           } else {

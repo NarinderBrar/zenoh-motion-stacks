@@ -56,6 +56,34 @@ JointModel JointModel::fromUrdf(const std::string &path,
   return result;
 }
 
+std::vector<JointLimit>
+JointModel::limitsFor(const std::string &path,
+                      const std::vector<std::string> &names) {
+  const auto model = urdf::parseURDFFile(path);
+  if (!model) {
+    throw std::invalid_argument("urdf_path could not be parsed: " + path);
+  }
+  std::vector<JointLimit> limits;
+  for (const auto &name : names) {
+    const auto joint = model->getJoint(name);
+    if (!joint || (joint->type != urdf::Joint::REVOLUTE &&
+                   joint->type != urdf::Joint::PRISMATIC)) {
+      throw std::invalid_argument(
+          "joint " + name + " must be a revolute or prismatic URDF joint");
+    }
+    if (!joint->limits || !std::isfinite(joint->limits->lower) ||
+        !std::isfinite(joint->limits->upper) ||
+        joint->limits->lower >= joint->limits->upper ||
+        !std::isfinite(joint->limits->velocity) ||
+        joint->limits->velocity <= 0.0) {
+      throw std::invalid_argument("joint " + name + " needs finite limits");
+    }
+    limits.push_back({name, joint->limits->lower, joint->limits->upper,
+                      joint->limits->velocity});
+  }
+  return limits;
+}
+
 const std::vector<JointLimit> &JointModel::joints() const { return joints_; }
 
 std::vector<double>

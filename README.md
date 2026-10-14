@@ -1,6 +1,6 @@
 # Motion stacks for Eclipse zenoh
 
-Standalone native Zenoh motion processes and a versioned JSON contract. This repository ships a **navigation baseline**, a **manipulation stack** with pose inverse kinematics, FCL collision checking, RRT-Connect planning, and synchronized trajectories, a command line client, and a headless base and joint-arm mock. Navigation drives around scanned obstacles with a local A* detour and a dynamic window controller, re-plans through a map when blocked, and runs rotate and back-up recovery. Localization against a map and additional drive models remain planned work.
+Standalone native Zenoh motion processes and a versioned JSON contract. This repository ships a **navigation baseline**, a **manipulation stack** with pose inverse kinematics, FCL collision checking, RRT-Connect planning, and synchronized trajectories, a command line client, and a headless base and joint-arm mock. Navigation drives around scanned obstacles with a local A* detour and a dynamic window controller, re-plans through a map when blocked, and runs rotate and back-up recovery. It also localizes against a map with a particle filter. Manipulation adds Cartesian straight-line moves and gripper commands. Additional drive models remain planned work.
 
 ## Build on Ubuntu 24.04
 

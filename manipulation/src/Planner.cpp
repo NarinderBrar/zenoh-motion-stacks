@@ -289,6 +289,21 @@ std::vector<double> Trajectory::sample(double time) const {
   if (time >= duration()) {
     return points.back();
   }
+  if (continuous) {
+    const double reached = trapezoidPosition(time, duration(), peakProgressRate,
+                                             peakProgressAcceleration);
+    const double target = std::clamp(reached, 0.0, progress.back());
+    const auto upper =
+        std::upper_bound(progress.begin(), progress.end(), target);
+    const std::size_t segment = std::min<std::size_t>(
+        static_cast<std::size_t>(std::distance(progress.begin(), upper)) - 1,
+        points.size() - 2);
+    const double span = progress[segment + 1] - progress[segment];
+    const double ratio =
+        span > 0.0 ? std::clamp((target - progress[segment]) / span, 0.0, 1.0)
+                   : 1.0;
+    return interpolate(points[segment], points[segment + 1], ratio);
+  }
   const auto upper = std::upper_bound(times.begin(), times.end(), time);
   const std::size_t segment =
       static_cast<std::size_t>(std::distance(times.begin(), upper)) - 1;
@@ -334,6 +349,89 @@ Trajectory timeParameterize(const JointPath &path,
                                std::max(segmentTime, 1e-6));
   }
   return trajectory;
+}
+
+Trajectory timeParameterizeContinuous(const JointPath &path,
+                                      const std::vector<JointLimit> &limits,
+                                      double maxAcceleration) {
+  if (path.size() < 2 || maxAcceleration <= 0.0) {
+    return timeParameterize(path, limits, maxAcceleration);
+  }
+  Trajectory trajectory;
+  trajectory.continuous = true;
+  trajectory.points = path;
+  trajectory.progress.push_back(0.0);
+  double fastestJoint = 0.0;
+  for (const auto &limit : limits) {
+    fastestJoint = std::max(fastestJoint, limit.velocity);
+  }
+  for (std::size_t segment = 0; segment + 1 < path.size(); ++segment) {
+    double slowest = 0.0;
+    for (std::size_t joint = 0; joint < limits.size(); ++joint) {
+      slowest = std::max(
+          slowest, std::abs(path[segment + 1][joint] - path[segment][joint]) /
+                       limits[joint].velocity);
+    }
+    trajectory.progress.push_back(trajectory.progress.back() + slowest);
+  }
+  const double total = trajectory.progress.back();
+  trajectory.peakProgressRate = 1.0;
+  trajectory.peakProgressAcceleration = maxAcceleration / fastestJoint;
+  const double duration =
+      total > 0.0 ? trapezoidTime(total, trajectory.peakProgressRate,
+                                  trajectory.peakProgressAcceleration)
+                  : 0.0;
+  trajectory.times = {0.0, std::max(duration, 1e-6)};
+  return trajectory;
+}
+
+CartesianPath planCartesianPath(const KinematicChain &chain,
+                                const std::vector<double> &start,
+                                const Eigen::Isometry3d &target,
+                                const std::vector<JointLimit> &limits,
+                                const StateValidity &valid, double positionStep,
+                                double angleStep, double maxJointJump) {
+  if (positionStep <= 0.0 || angleStep <= 0.0 || maxJointJump <= 0.0) {
+    throw std::invalid_argument("invalid cartesian step sizes");
+  }
+  const Eigen::Isometry3d origin = chain.forward(start);
+  const Eigen::Quaterniond from(origin.linear());
+  const Eigen::Quaterniond to(target.linear());
+  const double distanceToGo =
+      (target.translation() - origin.translation()).norm();
+  const double angleToGo = from.angularDistance(to);
+  const int steps =
+      std::max(1, static_cast<int>(std::ceil(std::max(
+                      distanceToGo / positionStep, angleToGo / angleStep))));
+  CartesianPath result;
+  result.path.push_back(start);
+  IkOptions options;
+  options.attempts = 1;
+  options.maxSolutions = 1;
+  std::vector<double> previous = start;
+  for (int step = 1; step <= steps; ++step) {
+    const double ratio = static_cast<double>(step) / steps;
+    Eigen::Isometry3d waypoint = Eigen::Isometry3d::Identity();
+    waypoint.translation() =
+        origin.translation() +
+        ratio * (target.translation() - origin.translation());
+    waypoint.linear() = from.slerp(ratio, to).toRotationMatrix();
+    const auto solution = chain.solveIk(waypoint, previous, limits, options);
+    if (!solution) {
+      break;
+    }
+    double jump = 0.0;
+    for (std::size_t joint = 0; joint < previous.size(); ++joint) {
+      jump = std::max(jump, std::abs((*solution)[joint] - previous[joint]));
+    }
+    if (jump > maxJointJump || !valid(*solution)) {
+      break;
+    }
+    result.path.push_back(*solution);
+    previous = *solution;
+    result.fraction = ratio;
+  }
+  return result;
 }
 
 }

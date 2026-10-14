@@ -1,6 +1,7 @@
 #pragma once
 
 #include <zms/manipulation/JointModel.hpp>
+#include <zms/manipulation/Kinematics.hpp>
 
 #include <condition_variable>
 #include <cstdint>
@@ -34,11 +35,27 @@ planJointPath(const std::vector<double> &start, const std::vector<double> &goal,
               const PlannerOptions &options, std::stop_token stop = {},
               std::string *error = nullptr);
 
+struct CartesianPath {
+  JointPath path;
+  double fraction = 0.0;
+};
+
+CartesianPath
+planCartesianPath(const KinematicChain &chain, const std::vector<double> &start,
+                  const Eigen::Isometry3d &target,
+                  const std::vector<JointLimit> &limits,
+                  const StateValidity &valid, double positionStep = 0.01,
+                  double angleStep = 0.02, double maxJointJump = 0.2);
+
 struct Trajectory {
   std::vector<double> times;
   JointPath points;
   std::vector<double> peakVelocity;
   std::vector<double> peakAcceleration;
+  bool continuous = false;
+  std::vector<double> progress;
+  double peakProgressRate = 1.0;
+  double peakProgressAcceleration = 1.0;
 
   double duration() const;
   std::vector<double> sample(double time) const;
@@ -87,5 +104,9 @@ private:
 Trajectory timeParameterize(const JointPath &path,
                             const std::vector<JointLimit> &limits,
                             double maxAcceleration);
+
+Trajectory timeParameterizeContinuous(const JointPath &path,
+                                      const std::vector<JointLimit> &limits,
+                                      double maxAcceleration);
 
 }

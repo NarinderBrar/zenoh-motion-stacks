@@ -41,6 +41,7 @@ struct PoseTarget {
   double qw = 1.0;
   std::string baseFrame;
   std::string endEffectorFrame;
+  bool cartesian = false;
 };
 
 struct JointTarget {
@@ -54,15 +55,24 @@ struct Target {
   std::variant<PoseTarget, JointTarget> value;
 };
 
+struct GripperCommand {
+  std::string commandId;
+  std::string clientId;
+  std::string action;
+  std::vector<double> positions;
+};
+
 std::string key(std::string_view prefix, std::string_view suffix);
 std::string_view name(StackKind kind);
 std::string_view name(CommandState state);
 Goal parseGoal(const nlohmann::json &payload);
 Cancel parseCancel(const nlohmann::json &payload);
 Target parseTarget(const nlohmann::json &payload);
+GripperCommand parseGripper(const nlohmann::json &payload);
 nlohmann::json toJson(const Goal &goal);
 nlohmann::json toJson(const Cancel &cancel);
 nlohmann::json toJson(const Target &target);
+nlohmann::json toJson(const GripperCommand &command);
 nlohmann::json accepted(const std::string &commandId,
                         const std::string &clientId);
 nlohmann::json rejected(const std::string &commandId,

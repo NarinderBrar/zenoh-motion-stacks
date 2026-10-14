@@ -23,6 +23,9 @@ All keys below are relative to the configured robot prefix. A prefix has no lead
 | `manipulation/result` | publish | Terminal command state |
 | `manipulation/alive` | liveliness token | Presence |
 | `cmd_joints` | publish | Joint command samples |
+| `manipulation/gripper` | queryable | Open, close, or position the configured gripper |
+| `localization/pose` | publish | Map-frame pose estimate when localization is enabled |
+| `localization/initial_pose` | subscribe | Map-frame start pose for localization |
 | `joint_states` | subscribe | Joint positions and velocities |
 
 ## Navigation requests

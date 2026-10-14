@@ -1,6 +1,7 @@
 #include <zms/contract/Contract.hpp>
 #include <zms/contract/ZenohClient.hpp>
 #include <zms/navigation/LocalPlanner.hpp>
+#include <zms/navigation/Localization.hpp>
 #include <zms/navigation/Navigation.hpp>
 #include <zms/navigation/PlanningWorker.hpp>
 
@@ -45,6 +46,10 @@ struct Config {
   double avoidanceHorizonSeconds = 1.5;
   double recoveryAfterSeconds = 2.0;
   double localWindowMeters = 6.0;
+  zms::navigation::Pose scanOffset;
+  bool localization = false;
+  int localizationParticles = 400;
+  std::optional<zms::navigation::Pose> initialPose;
   zms::navigation::Limits limits;
 };
 
@@ -85,7 +90,8 @@ Config loadConfig(const std::string &path) {
   knownFields(document,
               {"version", "robot_prefix", "control_rate_hz", "odom_timeout_s",
                "scan_timeout_s", "footprint_radius", "obstacle_margin",
-               "progress_timeout_s", "avoidance", "limits"},
+               "progress_timeout_s", "avoidance", "scan_offset", "localization",
+               "limits"},
               "config");
   if (!document.contains("version") || document.at("version") != 1) {
     throw std::invalid_argument("config.version must be 1");
@@ -135,6 +141,52 @@ Config loadConfig(const std::string &path) {
     result.localWindowMeters =
         positiveNumber(avoidance, "local_window_m", result.localWindowMeters);
   }
+  const auto poseField = [](const Json &object, const std::string &where) {
+    knownFields(object, {"x", "y", "yaw"}, where);
+    zms::navigation::Pose pose;
+    for (const auto &[name, target] :
+         {std::pair{"x", &pose.x}, std::pair{"y", &pose.y},
+          std::pair{"yaw", &pose.yaw}}) {
+      if (object.contains(name)) {
+        if (!object.at(name).is_number() ||
+            !std::isfinite(object.at(name).get<double>())) {
+          throw std::invalid_argument(where + "." + name +
+                                      " must be a finite number");
+        }
+        *target = object.at(name).get<double>();
+      }
+    }
+    return pose;
+  };
+  if (document.contains("scan_offset")) {
+    result.scanOffset =
+        poseField(document.at("scan_offset"), "config.scan_offset");
+  }
+  if (document.contains("localization")) {
+    const auto &localization = document.at("localization");
+    knownFields(localization, {"enabled", "particles", "initial_pose"},
+                "config.localization");
+    if (localization.contains("enabled")) {
+      if (!localization.at("enabled").is_boolean()) {
+        throw std::invalid_argument(
+            "config.localization.enabled must be a boolean");
+      }
+      result.localization = localization.at("enabled").get<bool>();
+    }
+    if (localization.contains("particles")) {
+      if (!localization.at("particles").is_number_integer() ||
+          localization.at("particles").get<int>() < 50 ||
+          localization.at("particles").get<int>() > 5000) {
+        throw std::invalid_argument(
+            "config.localization.particles must be an integer from 50 to 5000");
+      }
+      result.localizationParticles = localization.at("particles").get<int>();
+    }
+    if (localization.contains("initial_pose")) {
+      result.initialPose = poseField(localization.at("initial_pose"),
+                                     "config.localization.initial_pose");
+    }
+  }
   if (document.contains("limits")) {
     const auto &limits = document.at("limits");
     knownFields(limits,
@@ -181,6 +233,7 @@ struct Mailbox {
   };
   std::deque<Scan> scans;
   std::deque<std::shared_ptr<const zms::navigation::OccupancyGrid>> maps;
+  std::optional<zms::navigation::Pose> initialPose;
   Json status = {{"contract", 1}, {"state", "idle"}};
 };
 
@@ -260,7 +313,7 @@ int run(const Config &config) {
           std::lock_guard lock(mailbox.mutex);
           current = mailbox.status;
         }
-        current["stack_version"] = "0.1.0";
+        current["stack_version"] = "0.2.0";
         current["features"] =
             config.avoidance
                 ? Json::array({"waypoint_route", "differential_drive",
@@ -268,6 +321,9 @@ int run(const Config &config) {
                                "obstacle_replanning", "recovery_behaviors"})
                 : Json::array({"waypoint_route", "differential_drive",
                                "scan_obstacle_stop", "grid_astar"});
+        if (config.localization) {
+          current["features"].push_back("particle_filter_localization");
+        }
         return current;
       });
   auto odomSubscriber = session.declare_subscriber(
@@ -313,16 +369,19 @@ int run(const Config &config) {
               return;
             }
           }
-          const double nearest = zms::navigation::nearestForwardObstacle(
-              ranges, value.at("angle_min").get<double>(),
-              value.at("angle_increment").get<double>(),
-              value.at("range_min").get<double>(),
-              value.at("range_max").get<double>());
-          auto points = zms::navigation::scanToPoints(
-              ranges, value.at("angle_min").get<double>(),
-              value.at("angle_increment").get<double>(),
-              value.at("range_min").get<double>(),
-              value.at("range_max").get<double>());
+          auto points = zms::navigation::toWorld(
+              zms::navigation::scanToPoints(
+                  ranges, value.at("angle_min").get<double>(),
+                  value.at("angle_increment").get<double>(),
+                  value.at("range_min").get<double>(),
+                  value.at("range_max").get<double>()),
+              config.scanOffset);
+          double nearest = std::numeric_limits<double>::infinity();
+          for (const auto &point : points) {
+            if (point.x >= 0.0) {
+              nearest = std::min(nearest, std::hypot(point.x, point.y));
+            }
+          }
           std::lock_guard lock(mailbox.mutex);
           if (mailbox.scans.size() == 4) {
             mailbox.scans.pop_front();
@@ -349,6 +408,35 @@ int run(const Config &config) {
         }
       },
       [] {});
+  auto initialPoseSubscriber = session.declare_subscriber(
+      zenoh::KeyExpr(endpoint("localization/initial_pose")),
+      [&](const zenoh::Sample &sample) {
+        try {
+          const Json value = zms::contract::parseJson(sample.get_payload());
+          if (!value.contains("contract") || value.at("contract") != 1) {
+            return;
+          }
+          const zms::navigation::Pose initial{value.at("x").get<double>(),
+                                              value.at("y").get<double>(),
+                                              value.at("yaw").get<double>()};
+          if (!std::isfinite(initial.x) || !std::isfinite(initial.y) ||
+              !std::isfinite(initial.yaw)) {
+            return;
+          }
+          std::lock_guard lock(mailbox.mutex);
+          mailbox.initialPose = initial;
+        } catch (const std::exception &) {
+        }
+      },
+      [] {});
+  const std::string localizationPoseKey = endpoint("localization/pose");
+  zms::navigation::LocalizationConfig localizationConfig;
+  localizationConfig.particles = config.localizationParticles;
+  zms::navigation::ParticleFilter filter(localizationConfig);
+  std::shared_ptr<const zms::navigation::OccupancyGrid> filterMap;
+  std::optional<zms::navigation::Pose> odomPose;
+  bool odomUpdated = false;
+  Clock::time_point lastLocalizationPublish;
   auto aliveToken = session.liveliness_declare_token(
       zenoh::KeyExpr(endpoint("navigation/alive")));
   std::optional<zms::contract::Goal> active;
@@ -402,8 +490,13 @@ int run(const Config &config) {
     {
       std::lock_guard lock(mailbox.mutex);
       requests.swap(mailbox.requests);
+      if (mailbox.initialPose && config.localization) {
+        filter.initialize(*mailbox.initialPose);
+      }
+      mailbox.initialPose.reset();
       if (!mailbox.odometry.empty()) {
-        pose = mailbox.odometry.back().first;
+        odomPose = mailbox.odometry.back().first;
+        odomUpdated = true;
         lastOdom = mailbox.odometry.back().second;
         mailbox.odometry.clear();
       }
@@ -418,6 +511,35 @@ int run(const Config &config) {
         mailbox.maps.clear();
       }
     }
+    if (config.localization) {
+      if (latestMap && latestMap != filterMap) {
+        filterMap = latestMap;
+        filter.setMap(filterMap);
+      }
+      if (!filter.initialized() && config.initialPose) {
+        filter.initialize(*config.initialPose);
+      }
+      if (odomUpdated && odomPose) {
+        filter.update(*odomPose, scanPoints);
+      }
+      if (odomPose && filter.initialized() &&
+          now - lastLocalizationPublish > std::chrono::milliseconds(200)) {
+        lastLocalizationPublish = now;
+        const auto estimate = filter.toMap(*odomPose);
+        zms::contract::publish(session, localizationPoseKey,
+                               {{"contract", 1},
+                                {"x", estimate.x},
+                                {"y", estimate.y},
+                                {"yaw", estimate.yaw},
+                                {"spread", filter.positionSpread()}});
+      }
+    }
+    if (odomPose) {
+      pose = config.localization && filter.initialized()
+                 ? filter.toMap(*odomPose)
+                 : *odomPose;
+    }
+    odomUpdated = false;
     for (const auto &request : requests) {
       auto expected = Claim::Waiting;
       if (!request->claim.compare_exchange_strong(expected, Claim::Handled)) {
@@ -731,6 +853,8 @@ int run(const Config &config) {
                                           : zms::contract::CommandState::Active)
               : Json{{"contract", 1}, {"state", "idle"}};
       mailbox.status["map_available"] = static_cast<bool>(latestMap);
+      mailbox.status["localized"] =
+          config.localization && filter.initialized() && filter.hasMap();
     }
     previousTick = now;
     next += std::chrono::duration_cast<Clock::duration>(period);
@@ -754,7 +878,7 @@ int main(int argc, char **argv) {
   try {
     if (argc == 2 && std::string_view(argv[1]) == "--version") {
       std::cout << Json{{"stack", "navigation"},
-                        {"version", "0.1.0"},
+                        {"version", "0.2.0"},
                         {"contract", 1},
                         {"config_versions", Json::array({1})}}
                        .dump()
