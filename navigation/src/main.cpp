@@ -1,5 +1,6 @@
 #include <zms/contract/Contract.hpp>
 #include <zms/contract/ZenohClient.hpp>
+#include <zms/navigation/LocalPlanner.hpp>
 #include <zms/navigation/Navigation.hpp>
 #include <zms/navigation/PlanningWorker.hpp>
 
@@ -40,6 +41,10 @@ struct Config {
   double footprintRadius = 0.25;
   double obstacleMargin = 0.1;
   double progressTimeoutSeconds = 15.0;
+  bool avoidance = true;
+  double avoidanceHorizonSeconds = 1.5;
+  double recoveryAfterSeconds = 2.0;
+  double localWindowMeters = 6.0;
   zms::navigation::Limits limits;
 };
 
@@ -80,7 +85,7 @@ Config loadConfig(const std::string &path) {
   knownFields(document,
               {"version", "robot_prefix", "control_rate_hz", "odom_timeout_s",
                "scan_timeout_s", "footprint_radius", "obstacle_margin",
-               "progress_timeout_s", "limits"},
+               "progress_timeout_s", "avoidance", "limits"},
               "config");
   if (!document.contains("version") || document.at("version") != 1) {
     throw std::invalid_argument("config.version must be 1");
@@ -111,6 +116,25 @@ Config loadConfig(const std::string &path) {
       positiveNumber(document, "obstacle_margin", result.obstacleMargin);
   result.progressTimeoutSeconds = positiveNumber(document, "progress_timeout_s",
                                                  result.progressTimeoutSeconds);
+  if (document.contains("avoidance")) {
+    const auto &avoidance = document.at("avoidance");
+    knownFields(avoidance,
+                {"enabled", "horizon_s", "recovery_after_s", "local_window_m"},
+                "config.avoidance");
+    if (avoidance.contains("enabled")) {
+      if (!avoidance.at("enabled").is_boolean()) {
+        throw std::invalid_argument(
+            "config.avoidance.enabled must be a boolean");
+      }
+      result.avoidance = avoidance.at("enabled").get<bool>();
+    }
+    result.avoidanceHorizonSeconds =
+        positiveNumber(avoidance, "horizon_s", result.avoidanceHorizonSeconds);
+    result.recoveryAfterSeconds = positiveNumber(avoidance, "recovery_after_s",
+                                                 result.recoveryAfterSeconds);
+    result.localWindowMeters =
+        positiveNumber(avoidance, "local_window_m", result.localWindowMeters);
+  }
   if (document.contains("limits")) {
     const auto &limits = document.at("limits");
     knownFields(limits,
@@ -150,7 +174,12 @@ struct Mailbox {
   std::mutex mutex;
   std::deque<std::shared_ptr<Request>> requests;
   std::deque<std::pair<zms::navigation::Pose, Clock::time_point>> odometry;
-  std::deque<std::pair<double, Clock::time_point>> scans;
+  struct Scan {
+    double nearest = 0.0;
+    std::vector<zms::navigation::Point2> points;
+    Clock::time_point received;
+  };
+  std::deque<Scan> scans;
   std::deque<std::shared_ptr<const zms::navigation::OccupancyGrid>> maps;
   Json status = {{"contract", 1}, {"state", "idle"}};
 };
@@ -233,8 +262,12 @@ int run(const Config &config) {
         }
         current["stack_version"] = "0.1.0";
         current["features"] =
-            Json::array({"waypoint_route", "differential_drive",
-                         "scan_obstacle_stop", "grid_astar"});
+            config.avoidance
+                ? Json::array({"waypoint_route", "differential_drive",
+                               "grid_astar", "local_avoidance",
+                               "obstacle_replanning", "recovery_behaviors"})
+                : Json::array({"waypoint_route", "differential_drive",
+                               "scan_obstacle_stop", "grid_astar"});
         return current;
       });
   auto odomSubscriber = session.declare_subscriber(
@@ -285,11 +318,16 @@ int run(const Config &config) {
               value.at("angle_increment").get<double>(),
               value.at("range_min").get<double>(),
               value.at("range_max").get<double>());
+          auto points = zms::navigation::scanToPoints(
+              ranges, value.at("angle_min").get<double>(),
+              value.at("angle_increment").get<double>(),
+              value.at("range_min").get<double>(),
+              value.at("range_max").get<double>());
           std::lock_guard lock(mailbox.mutex);
-          if (mailbox.scans.size() == 32) {
+          if (mailbox.scans.size() == 4) {
             mailbox.scans.pop_front();
           }
-          mailbox.scans.emplace_back(nearest, Clock::now());
+          mailbox.scans.push_back({nearest, std::move(points), Clock::now()});
         } catch (const std::exception &) {
         }
       },
@@ -316,6 +354,25 @@ int run(const Config &config) {
   std::optional<zms::contract::Goal> active;
   std::optional<zms::navigation::Pose> pose;
   std::optional<double> nearestScan;
+  std::vector<zms::navigation::Point2> scanPoints;
+  enum class Recovery { None, Rotate, Backup };
+  Recovery recovery = Recovery::None;
+  bool blocked = false;
+  Clock::time_point blockedSince;
+  Clock::time_point recoveryStarted;
+  double recoveryDirection = 1.0;
+  zms::navigation::Pose recoveryStartPose;
+  std::size_t waypointOffset = 0;
+  bool replanning = false;
+  std::size_t replanOffset = 0;
+  zms::navigation::LocalPlannerConfig localConfig;
+  localConfig.robotRadius = config.footprintRadius;
+  localConfig.safetyMargin = config.obstacleMargin;
+  localConfig.horizonSeconds = config.avoidanceHorizonSeconds;
+  const auto resetAvoidance = [&] {
+    recovery = Recovery::None;
+    blocked = false;
+  };
   std::shared_ptr<const zms::navigation::OccupancyGrid> latestMap;
   std::vector<zms::contract::Waypoint> route;
   std::vector<std::size_t> routeWaypointIndices;
@@ -331,7 +388,7 @@ int run(const Config &config) {
   Clock::time_point commandStarted = Clock::now();
   const auto submittedWaypointIndex = [&] {
     if (routePlannedFromMap && waypointIndex < routeWaypointIndices.size()) {
-      return routeWaypointIndices[waypointIndex];
+      return waypointOffset + routeWaypointIndices[waypointIndex];
     }
     return waypointIndex;
   };
@@ -351,8 +408,9 @@ int run(const Config &config) {
         mailbox.odometry.clear();
       }
       if (!mailbox.scans.empty()) {
-        nearestScan = mailbox.scans.back().first;
-        lastScan = mailbox.scans.back().second;
+        nearestScan = mailbox.scans.back().nearest;
+        scanPoints = std::move(mailbox.scans.back().points);
+        lastScan = mailbox.scans.back().received;
         mailbox.scans.clear();
       }
       if (!mailbox.maps.empty()) {
@@ -387,8 +445,11 @@ int run(const Config &config) {
         planGeneration.reset();
         commandStarted = now;
         waypointIndex = 0;
+        waypointOffset = 0;
+        replanning = false;
         aligning = false;
         progress.reset();
+        resetAvoidance();
         previous = {};
         request->reply.set_value(
             zms::contract::accepted(incoming.commandId, incoming.clientId));
@@ -426,7 +487,9 @@ int run(const Config &config) {
         continue;
       }
       planGeneration.reset();
-      if (!outcome->error.empty()) {
+      if (!outcome->error.empty() && replanning) {
+        replanning = false;
+      } else if (!outcome->error.empty()) {
         publishVelocity(session, velocityKey, {});
         publishResult(session, resultKey, *active,
                       zms::contract::CommandState::Failed, "planning_failed",
@@ -438,8 +501,11 @@ int run(const Config &config) {
         routeWaypointIndices = std::move(outcome->waypointIndices);
         routePlannedFromMap = true;
         waypointIndex = 0;
+        waypointOffset = replanning ? replanOffset : 0;
+        replanning = false;
         aligning = false;
         progress.reset();
+        resetAvoidance();
       }
     }
     if (active) {
@@ -489,8 +555,9 @@ int run(const Config &config) {
         planGeneration.reset();
         planner.cancel();
         previous = {};
-      } else if (nearestScan && *nearestScan < config.footprintRadius +
-                                                   config.obstacleMargin) {
+      } else if (!config.avoidance && nearestScan &&
+                 *nearestScan <
+                     config.footprintRadius + config.obstacleMargin) {
         publishVelocity(session, velocityKey, {});
         previous = {};
         Json feedback =
@@ -506,12 +573,129 @@ int run(const Config &config) {
         publishVelocity(session, velocityKey, {});
         previous = {};
       } else {
-        const auto step = zms::navigation::follow(
-            *pose, route, waypointIndex, previous, config.limits,
-            std::max(0.001,
-                     std::chrono::duration<double>(now - previousTick).count()),
-            !routePlannedFromMap, aligning);
-        aligning = step.waypointIndex == waypointIndex && step.aligning;
+        const double elapsed = std::max(
+            0.001, std::chrono::duration<double>(now - previousTick).count());
+        zms::navigation::StepResult step;
+        const bool avoiding = config.avoidance && nearestScan.has_value();
+        if (avoiding && routePlannedFromMap) {
+          waypointIndex = zms::navigation::lookaheadIndex(
+              *pose, route, waypointIndex, config.limits.positionTolerance);
+        }
+        const auto &current = route[waypointIndex];
+        const double toCurrent =
+            std::hypot(current.x - pose->x, current.y - pose->y);
+        const auto obstacles = avoiding
+                                   ? zms::navigation::toWorld(scanPoints, *pose)
+                                   : std::vector<zms::navigation::Point2>{};
+        const bool directClear =
+            avoiding && recovery == Recovery::None &&
+            zms::navigation::segmentClear(
+                *pose,
+                route[routePlannedFromMap ? zms::navigation::lookaheadIndex(
+                                                *pose, route, waypointIndex,
+                                                config.limits.lookaheadDistance)
+                                          : waypointIndex],
+                obstacles, config.footprintRadius + config.obstacleMargin);
+        if (!avoiding || aligning || directClear ||
+            toCurrent <= config.limits.positionTolerance) {
+          step = zms::navigation::follow(*pose, route, waypointIndex, previous,
+                                         config.limits, elapsed,
+                                         !routePlannedFromMap, aligning);
+          aligning = step.waypointIndex == waypointIndex && step.aligning;
+          resetAvoidance();
+        } else {
+          step.waypointIndex = waypointIndex;
+          if (recovery == Recovery::Rotate) {
+            step.velocity = {0.0, recoveryDirection * 0.5 *
+                                      config.limits.maxAngularSpeed};
+            if (std::chrono::duration<double>(now - recoveryStarted).count() >
+                2.0) {
+              const double rearClearance =
+                  config.footprintRadius + config.obstacleMargin + 0.25;
+              const bool rearClear = std::none_of(
+                  scanPoints.begin(), scanPoints.end(), [&](const auto &point) {
+                    return point.x < 0.0 &&
+                           std::hypot(point.x, point.y) < rearClearance;
+                  });
+              recovery = rearClear ? Recovery::Backup : Recovery::None;
+              recoveryStarted = now;
+              recoveryStartPose = *pose;
+              blocked = false;
+            }
+          } else if (recovery == Recovery::Backup) {
+            step.velocity = {-0.1, 0.0};
+            if (std::hypot(pose->x - recoveryStartPose.x,
+                           pose->y - recoveryStartPose.y) > 0.2 ||
+                std::chrono::duration<double>(now - recoveryStarted).count() >
+                    3.0) {
+              recovery = Recovery::None;
+              blocked = false;
+            }
+          } else {
+            const std::size_t targetIndex =
+                routePlannedFromMap ? zms::navigation::lookaheadIndex(
+                                          *pose, route, waypointIndex,
+                                          config.limits.lookaheadDistance)
+                                    : waypointIndex;
+            std::vector<zms::contract::Waypoint> guide = {route[targetIndex]};
+            if (auto local = zms::navigation::planLocalPath(
+                    *pose, route[targetIndex], obstacles,
+                    config.footprintRadius + config.obstacleMargin,
+                    config.localWindowMeters)) {
+              guide = std::move(*local);
+            }
+            const auto &stopPoint =
+                routePlannedFromMap ? route.back() : route[waypointIndex];
+            const auto plan = zms::navigation::chooseVelocity(
+                *pose, previous, obstacles, guide,
+                std::hypot(stopPoint.x - pose->x, stopPoint.y - pose->y),
+                config.limits, localConfig, elapsed);
+            const bool moving =
+                plan.found && (plan.target.linear > 0.01 ||
+                               std::abs(plan.target.angular) > 0.05);
+            step.velocity =
+                moving ? plan.velocity : zms::navigation::Velocity{};
+            if (moving) {
+              blocked = false;
+            } else if (!blocked) {
+              blocked = true;
+              blockedSince = now;
+            } else if (std::chrono::duration<double>(now - blockedSince)
+                           .count() > config.recoveryAfterSeconds) {
+              if (latestMap && !planGeneration) {
+                auto grid = std::make_shared<zms::navigation::OccupancyGrid>(
+                    *latestMap);
+                for (const auto &point : obstacles) {
+                  const double dx = point.x - grid->origin.x;
+                  const double dy = point.y - grid->origin.y;
+                  const double cosine = std::cos(grid->origin.yaw);
+                  const double sine = std::sin(grid->origin.yaw);
+                  const int x = static_cast<int>(
+                      std::floor((cosine * dx + sine * dy) / grid->resolution));
+                  const int y = static_cast<int>(std::floor(
+                      (-sine * dx + cosine * dy) / grid->resolution));
+                  if (x >= 0 && y >= 0 && x < grid->width && y < grid->height) {
+                    grid->cells[static_cast<std::size_t>(y) * grid->width + x] =
+                        100;
+                  }
+                }
+                replanOffset = submittedWaypointIndex();
+                std::vector<zms::contract::Waypoint> remaining(
+                    active->waypoints.begin() +
+                        static_cast<std::ptrdiff_t>(replanOffset),
+                    active->waypoints.end());
+                planGeneration = planner.submit(
+                    {grid, *pose, remaining,
+                     config.footprintRadius + config.obstacleMargin});
+                replanning = true;
+              }
+              recovery = Recovery::Rotate;
+              recoveryStarted = now;
+              recoveryDirection =
+                  zms::navigation::freeTurnDirection(*pose, obstacles);
+            }
+          }
+        }
         waypointIndex = step.waypointIndex;
         previous = step.velocity;
         publishVelocity(session, velocityKey, step.velocity);
@@ -529,6 +713,10 @@ int run(const Config &config) {
           feedback["x"] = pose->x;
           feedback["y"] = pose->y;
           feedback["yaw"] = pose->yaw;
+          feedback["blocked"] = blocked;
+          feedback["recovery"] = recovery == Recovery::Rotate   ? "rotate"
+                                 : recovery == Recovery::Backup ? "backup"
+                                                                : "none";
           zms::contract::publish(session, feedbackKey, feedback);
         }
       }

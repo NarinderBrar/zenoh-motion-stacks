@@ -12,6 +12,7 @@
 #include <csignal>
 #include <deque>
 #include <filesystem>
+#include <limits>
 #include <fstream>
 #include <mutex>
 #include <optional>
@@ -199,6 +200,8 @@ public:
       std::lock_guard lock(mutex_);
       lastOdom_ = value;
       maximumY_ = std::max(maximumY_, value.at("y").get<double>());
+      trail_.emplace_back(value.at("x").get<double>(),
+                          value.at("y").get<double>());
       ready_.notify_all();
     } catch (const std::exception &) {
     }
@@ -256,6 +259,15 @@ public:
     });
   }
 
+  double closestApproach(double x, double y) {
+    std::lock_guard lock(mutex_);
+    double closest = std::numeric_limits<double>::infinity();
+    for (const auto &[px, py] : trail_) {
+      closest = std::min(closest, std::hypot(px - x, py - y));
+    }
+    return closest;
+  }
+
   double x() {
     std::lock_guard lock(mutex_);
     return lastOdom_.value().at("x").get<double>();
@@ -291,6 +303,7 @@ private:
   std::deque<Json> results_;
   std::optional<Json> lastVelocity_;
   std::optional<Json> lastOdom_;
+  std::vector<std::pair<double, double>> trail_;
   std::optional<Json> lastJointStates_;
   double maximumY_ = 0.0;
   std::size_t velocitySequence_ = 0;
@@ -471,6 +484,34 @@ TEST(Integration, NavigationWorkflow) {
   ASSERT_TRUE(shutdown.has_value());
   EXPECT_EQ(shutdown->at("reason"), "shutdown");
   EXPECT_TRUE(observations.waitForZeroAfter(beforeShutdown, 2s));
+}
+
+TEST(Integration, NavigationAvoidsObstacleOnStraightRoute) {
+  const auto executableDirectory =
+      std::filesystem::canonical("/proc/self/exe").parent_path();
+  const std::string prefix = "avoid-integration/" + std::to_string(getpid());
+  TemporaryConfig config(prefix);
+  Process mock(executableDirectory / "zms_mock_robot",
+               {prefix, "--obstacle", "0.9,0.0,0.12"});
+  Process stack(executableDirectory / "zms_navigation",
+                {"--config", config.path().string()});
+  zenoh::Session session(zenoh::Config::create_default());
+  Observations observations;
+  auto results = session.declare_subscriber(
+      zenoh::KeyExpr(zms::contract::key(prefix, "navigation/result")),
+      [&](const zenoh::Sample &sample) { observations.result(sample); }, [] {});
+  auto odometry = session.declare_subscriber(
+      zenoh::KeyExpr(zms::contract::key(prefix, "odom")),
+      [&](const zenoh::Sample &sample) { observations.odometry(sample); },
+      [] {});
+  waitForStack(session, prefix, "navigation");
+  ASSERT_TRUE(observations.waitForOdom(5s));
+  std::this_thread::sleep_for(500ms);
+  ASSERT_TRUE(requestGoal(session, prefix, "around", 1.8).at("accepted"));
+  const auto result = observations.waitForResult("around", 40s);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->at("state"), "succeeded") << result->dump();
+  EXPECT_GT(observations.closestApproach(0.9, 0.0), 0.12 + 0.25);
 }
 
 TEST(Integration, ManipulationJointWorkflow) {

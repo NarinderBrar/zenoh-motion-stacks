@@ -28,7 +28,7 @@ target_include_directories(zms_contract_transport PUBLIC
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(zms_contract_transport PUBLIC zms_contract zenohcxx::zenohc)
 
-add_library(zms_navigation_core navigation/src/Navigation.cpp navigation/src/GridPlanner.cpp navigation/src/PlanningWorker.cpp)
+add_library(zms_navigation_core navigation/src/Navigation.cpp navigation/src/GridPlanner.cpp navigation/src/PlanningWorker.cpp navigation/src/LocalPlanner.cpp)
 add_library(motion_stacks::navigation_core ALIAS zms_navigation_core)
 set_target_properties(zms_navigation_core PROPERTIES EXPORT_NAME navigation_core)
 target_include_directories(zms_navigation_core PUBLIC

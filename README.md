@@ -1,6 +1,6 @@
 # Motion stacks for Eclipse zenoh
 
-Standalone native Zenoh motion processes and a versioned JSON contract. This repository ships a **navigation baseline**, a **manipulation stack** with pose inverse kinematics, FCL collision checking, RRT-Connect planning, and synchronized trajectories, a command line client, and a headless base and joint-arm mock. Local obstacle avoidance, localization, and recovery behaviors for navigation remain planned work.
+Standalone native Zenoh motion processes and a versioned JSON contract. This repository ships a **navigation baseline**, a **manipulation stack** with pose inverse kinematics, FCL collision checking, RRT-Connect planning, and synchronized trajectories, a command line client, and a headless base and joint-arm mock. Navigation drives around scanned obstacles with a local A* detour and a dynamic window controller, re-plans through a map when blocked, and runs rotate and back-up recovery. Localization against a map and additional drive models remain planned work.
 
 ## Build on Ubuntu 24.04
 
@@ -54,7 +54,7 @@ See [`docs/manipulation.md`](docs/manipulation.md) for the supported scope and c
 
 ## Status and scope
 
-The repository is at an early implementation stage. Navigation currently follows waypoints, plans through occupancy grids with A*, and stops on close forward scan returns. It does not use OMPL. Manipulation accepts joint and pose targets and plans collision-free joint paths; it has no Cartesian moves, gripper commands, mesh collision, or jerk-limited stop yet. Advanced planning, full dependency automation, clean-container verification, and desktop client integration remain open. The default test suite covers codecs, URDF validation, and a fake stack. The optional native Zenoh integration tests cover navigation and joint and pose manipulation with the mock robot:
+The repository is at an early implementation stage. Navigation follows waypoints, plans through occupancy grids with A*, and avoids scanned obstacles. It does not use OMPL. Manipulation accepts joint and pose targets and plans collision-free joint paths; it has no Cartesian moves, gripper commands, mesh collision, or jerk-limited stop yet. Advanced planning, full dependency automation, clean-container verification, and desktop client integration remain open. The default test suite covers codecs, URDF validation, and a fake stack. The optional native Zenoh integration tests cover navigation and joint and pose manipulation with the mock robot:
 
 ```bash
 cmake --preset system -DZMS_ENABLE_LIVE_TESTS=ON

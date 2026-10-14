@@ -5,6 +5,7 @@
 #include <zms/manipulation/Kinematics.hpp>
 #include <zms/manipulation/Planner.hpp>
 #include <zms/navigation/GridPlanner.hpp>
+#include <zms/navigation/LocalPlanner.hpp>
 #include <zms/navigation/Navigation.hpp>
 #include <zms/navigation/PlanningWorker.hpp>
 
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <random>
 #include <stop_token>
@@ -359,6 +361,114 @@ TEST(Planner, TrajectoryIsSynchronizedAndWithinLimits) {
   const double middle = trajectory.times[1] / 2.0;
   const auto halfway = trajectory.sample(middle);
   EXPECT_NEAR(halfway[0] / 1.0, halfway[1] / 0.2, 1e-9);
+}
+
+namespace {
+
+zms::navigation::LocalPlan
+simulateToward(zms::navigation::Pose &pose,
+               const std::vector<zms::navigation::Point2> &obstacles,
+               const zms::contract::Waypoint &goal, double seconds,
+               double &closest) {
+  const zms::navigation::Limits limits;
+  const zms::navigation::LocalPlannerConfig config;
+  zms::navigation::Velocity velocity;
+  zms::navigation::LocalPlan last;
+  const double period = 0.05;
+  closest = std::numeric_limits<double>::infinity();
+  for (double t = 0.0; t < seconds; t += period) {
+    const double remaining = std::hypot(goal.x - pose.x, goal.y - pose.y);
+    if (remaining < 0.1) {
+      break;
+    }
+    std::vector<zms::contract::Waypoint> guide = {goal};
+    if (auto path = zms::navigation::planLocalPath(
+            pose, goal, obstacles, config.robotRadius + config.safetyMargin)) {
+      guide = std::move(*path);
+    }
+    last = zms::navigation::chooseVelocity(pose, velocity, obstacles, guide,
+                                           remaining, limits, config, period);
+    velocity = last.found ? last.velocity : zms::navigation::Velocity{};
+    pose.x += velocity.linear * std::cos(pose.yaw) * period;
+    pose.y += velocity.linear * std::sin(pose.yaw) * period;
+    pose.yaw =
+        zms::navigation::normalizeAngle(pose.yaw + velocity.angular * period);
+    closest = std::min(closest, zms::navigation::clearanceAt(pose, obstacles));
+  }
+  return last;
+}
+
+}
+
+TEST(LocalPlanner, ConvertsScansToPoints) {
+  const auto points = zms::navigation::scanToPoints(
+      {1.0, std::numeric_limits<double>::infinity(), 2.0, 0.01}, 0.0,
+      std::numbers::pi / 2.0, 0.05, 5.0);
+  ASSERT_EQ(points.size(), 2);
+  EXPECT_NEAR(points[0].x, 1.0, 1e-12);
+  EXPECT_NEAR(points[1].x, -2.0, 1e-12);
+  const auto world =
+      zms::navigation::toWorld(points, {1.0, 2.0, std::numbers::pi / 2.0});
+  EXPECT_NEAR(world[0].x, 1.0, 1e-12);
+  EXPECT_NEAR(world[0].y, 3.0, 1e-12);
+}
+
+TEST(LocalPlanner, DrivesStraightWhenClear) {
+  zms::navigation::Pose pose;
+  double closest = 0.0;
+  simulateToward(pose, {}, {3.0, 0.0, 0.0}, 20.0, closest);
+  EXPECT_NEAR(pose.x, 3.0, 0.12);
+  EXPECT_NEAR(pose.y, 0.0, 0.05);
+}
+
+TEST(LocalPlanner, SteersAroundObstacleWithoutTouchingIt) {
+  std::vector<zms::navigation::Point2> obstacles;
+  for (double angle = 0.0; angle < 2.0 * std::numbers::pi; angle += 0.1) {
+    obstacles.push_back({1.5 + 0.15 * std::cos(angle), 0.15 * std::sin(angle)});
+  }
+  zms::navigation::Pose pose;
+  double closest = 0.0;
+  simulateToward(pose, obstacles, {3.0, 0.0, 0.0}, 30.0, closest);
+  EXPECT_NEAR(std::hypot(pose.x - 3.0, pose.y), 0.0, 0.15);
+  const zms::navigation::LocalPlannerConfig config;
+  EXPECT_GE(closest, config.robotRadius + config.safetyMargin - 1e-6);
+}
+
+TEST(LocalPlanner, StopsWhenFullyBlockedAndAllowsEscape) {
+  std::vector<zms::navigation::Point2> wall;
+  for (double y = -3.0; y <= 3.0; y += 0.05) {
+    wall.push_back({0.8, y});
+  }
+  const zms::navigation::Limits limits;
+  const zms::navigation::LocalPlannerConfig config;
+  const auto plan = zms::navigation::chooseVelocity({0.0, 0.0, 0.0}, {0.0, 0.0},
+                                                    wall, {{3.0, 0.0, 0.0}},
+                                                    3.0, limits, config, 0.05);
+  EXPECT_TRUE(!plan.found || plan.velocity.linear < 0.05);
+  std::vector<zms::navigation::Point2> close = {{0.3, 0.0}};
+  const auto escape = zms::navigation::chooseVelocity(
+      {0.0, 0.0, 0.0}, {0.0, 0.0}, close, {{-2.0, 0.0, 0.0}}, 2.0, limits,
+      config, 0.05);
+  EXPECT_TRUE(escape.found);
+  EXPECT_EQ(zms::navigation::freeTurnDirection({0.0, 0.0, 0.0}, {{1.0, 0.5}}),
+            -1.0);
+}
+
+TEST(LocalPlanner, SegmentClearRespectsClearance) {
+  const std::vector<zms::navigation::Point2> post = {{1.0, 0.2}};
+  EXPECT_FALSE(zms::navigation::segmentClear({0.0, 0.0, 0.0}, {2.0, 0.0, 0.0},
+                                             post, 0.35));
+  EXPECT_TRUE(zms::navigation::segmentClear({0.0, 0.0, 0.0}, {2.0, 0.0, 0.0},
+                                            post, 0.15));
+  EXPECT_TRUE(zms::navigation::segmentClear({0.0, 0.0, 0.0}, {2.0, 0.0, 0.0},
+                                            {}, 0.35));
+}
+
+TEST(LocalPlanner, LookaheadSkipsNearbyRoutePoints) {
+  const std::vector<zms::contract::Waypoint> route = {
+      {0.1, 0.0, 0.0}, {0.2, 0.0, 0.0}, {0.6, 0.0, 0.0}, {1.0, 0.0, 0.0}};
+  EXPECT_EQ(zms::navigation::lookaheadIndex({0.0, 0.0, 0.0}, route, 0, 0.4), 2);
+  EXPECT_EQ(zms::navigation::lookaheadIndex({0.9, 0.0, 0.0}, route, 0, 0.4), 3);
 }
 
 TEST(Navigation, ReachesWaypointAndLimitsAcceleration) {

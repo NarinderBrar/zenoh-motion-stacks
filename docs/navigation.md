@@ -1,7 +1,19 @@
-# Navigation baseline
+# Navigation
 
 `zms_navigation` accepts a single active waypoint route and drives a differential drive base. The control loop runs at the configured rate. Requests, odometry, optional scans, and optional maps enter bounded queues; the control loop owns the active command. Grid search runs on a separate cancellable worker. It publishes zero velocity on cancel, odometry timeout, stale scan after scans have begun, obstacle stop, success, replacement, and process shutdown.
 
 The current follower turns toward a waypoint, then drives toward it under speed and acceleration limits. It aligns with the waypoint yaw at the final target. Once it is turning at a target, it keeps turning while it stays within twice `position_tolerance`, so drift during the turn does not send it back to driving; it drives again only if it drifts further. A command fails with `no_progress` when neither the distance nor the heading error to the current waypoint improves for `progress_timeout_s`, including while stopped for an obstacle. When a map is available when a goal is accepted, the worker searches an inflated occupancy grid with eight-neighbor A* and prevents diagonal corner cutting. Unknown cells are blocked. A failed or out-of-bounds path publishes `planning_failed`. When scans are available, a return in the forward half-plane closer than the configured footprint radius plus margin stops motion until clearance returns. If a previously available scan goes stale, the active command fails. This is a stop check, not a local avoidance planner. Use it only in a clear test area with an independent robot watchdog.
 
 The `features` field of `navigation/status` lists exactly `waypoint_route`, `differential_drive`, `scan_obstacle_stop`, and `grid_astar`. OMPL planning and additional drive models are not advertised.
+
+## Obstacle avoidance
+
+With `avoidance.enabled` (the default) and a `scan` stream, the stack drives around obstacles instead of stopping in front of them. Each control cycle it converts the latest scan to points, assuming the scan frame is the base frame, and:
+
+1. Picks a target: the current waypoint, or for a planned map route the route point `lookahead_distance` ahead.
+2. Plans a detour to that target with A* on a rolling grid of `avoidance.local_window_m` around the robot, inflated by `footprint_radius + obstacle_margin`.
+3. Chooses a velocity with a dynamic window search: candidate speed and turn-rate pairs within the acceleration limits are simulated for `avoidance.horizon_s`, discarded if they bring the circular footprint closer than `footprint_radius + obstacle_margin` to a scan point or cannot stop in time, and scored on progress toward a point on the detour, heading, clearance, and speed.
+
+When the straight line to the current target keeps that clearance, the stack uses the waypoint follower instead, so open stretches and the final approach behave as before. Turning to a waypoint heading also uses the follower. When no candidate moves the robot for `avoidance.recovery_after_s`, the stack re-plans the remaining route through the map with the scan points marked as occupied (when a map is available), turns in place toward the side with fewer obstacles for 2 seconds, then backs up up to 0.2 m when the rear is clear. Feedback reports `blocked` and `recovery` (`none`, `rotate`, or `backup`). `progress_timeout_s` still ends a command that makes no progress. With `avoidance.enabled` false the stack keeps the earlier behavior and stops for close forward returns, reporting `obstacle_stopped`.
+
+The `features` field then lists `waypoint_route`, `differential_drive`, `grid_astar`, `local_avoidance`, `obstacle_replanning`, and `recovery_behaviors`. Not yet implemented: localization against a map, costmap layers beyond the latest scan, omnidirectional and car-like drive models, and behavior trees.

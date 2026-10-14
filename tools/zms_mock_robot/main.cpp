@@ -10,6 +10,7 @@
 #include <mutex>
 #include <numbers>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -58,26 +59,83 @@ std::vector<std::string> parseJointNames(const std::string &value) {
   return names;
 }
 
+struct Obstacle {
+  double x = 0.0;
+  double y = 0.0;
+  double radius = 0.0;
+};
+
+Obstacle parseObstacle(const std::string &value) {
+  Obstacle obstacle;
+  char first = 0;
+  char second = 0;
+  std::istringstream input(value);
+  if (!(input >> obstacle.x >> first >> obstacle.y >> second >>
+        obstacle.radius) ||
+      first != ',' || second != ',' || !std::isfinite(obstacle.x) ||
+      !std::isfinite(obstacle.y) || !std::isfinite(obstacle.radius) ||
+      obstacle.radius <= 0.0) {
+    throw std::invalid_argument("--obstacle expects x,y,radius");
+  }
+  return obstacle;
+}
+
+double castRay(double x, double y, double angle,
+               const std::vector<Obstacle> &obstacles, double maximum) {
+  const double dx = std::cos(angle);
+  const double dy = std::sin(angle);
+  double nearest = maximum;
+  for (const auto &obstacle : obstacles) {
+    const double ox = obstacle.x - x;
+    const double oy = obstacle.y - y;
+    const double along = ox * dx + oy * dy;
+    const double offsetSquared = ox * ox + oy * oy - along * along;
+    const double radiusSquared = obstacle.radius * obstacle.radius;
+    if (along <= 0.0 || offsetSquared > radiusSquared) {
+      continue;
+    }
+    const double hit = along - std::sqrt(radiusSquared - offsetSquared);
+    if (hit > 0.0) {
+      nearest = std::min(nearest, hit);
+    }
+  }
+  return nearest;
+}
+
 }
 
 int main(int argc, char **argv) {
   try {
-    if (argc != 2 && argc != 4) {
+    if (argc < 2) {
       throw std::invalid_argument(
-          "usage: zms_mock_robot <robot-prefix> [--joints name1,name2,...]");
-    }
-    if (argc == 4 && std::string_view(argv[2]) != "--joints") {
-      throw std::invalid_argument("expected --joints");
+          "usage: zms_mock_robot <robot-prefix> [--joints name1,name2,...] "
+          "[--obstacle x,y,radius]...");
     }
     const std::string prefix = argv[1];
+    std::string jointList;
+    std::vector<Obstacle> obstacles;
+    for (int index = 2; index < argc; index += 2) {
+      if (index + 1 >= argc) {
+        throw std::invalid_argument("missing option value");
+      }
+      const std::string_view option = argv[index];
+      if (option == "--joints") {
+        jointList = argv[index + 1];
+      } else if (option == "--obstacle") {
+        obstacles.push_back(parseObstacle(argv[index + 1]));
+      } else {
+        throw std::invalid_argument("unknown option");
+      }
+    }
     const auto velocityKey = zms::contract::key(prefix, "cmd_vel");
     const auto odomKey = zms::contract::key(prefix, "odom");
     const auto jointCommandKey = zms::contract::key(prefix, "cmd_joints");
     const auto jointStateKey = zms::contract::key(prefix, "joint_states");
+    const auto scanKey = zms::contract::key(prefix, "scan");
     zenoh::Session session(zenoh::Config::create_default());
     State state;
-    if (argc == 4) {
-      state.jointNames = parseJointNames(argv[3]);
+    if (!jointList.empty()) {
+      state.jointNames = parseJointNames(jointList);
       state.jointPositions.resize(state.jointNames.size());
       state.jointTargets.resize(state.jointNames.size());
       state.jointVelocities.resize(state.jointNames.size());
@@ -148,6 +206,7 @@ int main(int argc, char **argv) {
     std::signal(SIGINT, requestStop);
     std::signal(SIGTERM, requestStop);
     auto previous = std::chrono::steady_clock::now();
+    unsigned tick = 0;
     while (!stopRequested) {
       const auto now = std::chrono::steady_clock::now();
       const double dt = std::chrono::duration<double>(now - previous).count();
@@ -189,6 +248,43 @@ int main(int argc, char **argv) {
         jointOptions.encoding = zenoh::Encoding("application/json");
         session.put(zenoh::KeyExpr(jointStateKey),
                     zenoh::Bytes(jointStates.dump()), std::move(jointOptions));
+      }
+      if (!obstacles.empty() && ++tick % 2 == 0) {
+        constexpr int beams = 360;
+        constexpr double maximumRange = 8.0;
+        nlohmann::json ranges = nlohmann::json::array();
+        double x = 0.0;
+        double y = 0.0;
+        double yaw = 0.0;
+        {
+          std::lock_guard lock(state.mutex);
+          x = state.x;
+          y = state.y;
+          yaw = state.yaw;
+        }
+        for (int beam = 0; beam < beams; ++beam) {
+          const double angle =
+              -std::numbers::pi + beam * 2.0 * std::numbers::pi / beams;
+          const double range =
+              castRay(x, y, yaw + angle, obstacles, maximumRange);
+          if (range >= maximumRange) {
+            ranges.push_back(nullptr);
+          } else {
+            ranges.push_back(range);
+          }
+        }
+        auto scanOptions = zenoh::Session::PutOptions::create_default();
+        scanOptions.encoding = zenoh::Encoding("application/json");
+        session.put(zenoh::KeyExpr(scanKey),
+                    zenoh::Bytes(nlohmann::json{
+                        {"contract", 1},
+                        {"angle_min", -std::numbers::pi},
+                        {"angle_increment", 2.0 * std::numbers::pi / beams},
+                        {"range_min", 0.05},
+                        {"range_max", maximumRange},
+                        {"ranges",
+                         ranges}}.dump()),
+                    std::move(scanOptions));
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
