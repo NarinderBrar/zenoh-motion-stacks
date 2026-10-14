@@ -56,6 +56,7 @@ private:
   std::vector<EnvironmentObject> environment_;
   std::vector<std::shared_ptr<fcl::CollisionGeometry<double>>>
       environmentShapes_;
+  double padding_ = 0.0;
   std::size_t skippedMeshes_ = 0;
 };
 

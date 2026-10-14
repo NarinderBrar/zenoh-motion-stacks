@@ -4,6 +4,7 @@
   "control_rate_hz": 20,
   "odom_timeout_s": 1.0,
   "scan_timeout_s": 1.0,
+  "scan_ignore_radius": 0.0,
   "footprint_radius": 0.25,
   "obstacle_margin": 0.1,
   "limits": {

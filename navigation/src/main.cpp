@@ -39,6 +39,7 @@ struct Config {
   int controlRateHz = 20;
   double odomTimeoutSeconds = 1.0;
   double scanTimeoutSeconds = 1.0;
+  double scanIgnoreRadius = 0.0;
   double footprintRadius = 0.25;
   double obstacleMargin = 0.1;
   double progressTimeoutSeconds = 15.0;
@@ -68,6 +69,22 @@ double positiveNumber(const Json &object, const char *field, double fallback) {
   return value;
 }
 
+double nonnegativeNumber(const Json &object, const char *field,
+                         double fallback) {
+  if (!object.contains(field)) {
+    return fallback;
+  }
+  if (!object.at(field).is_number()) {
+    throw std::invalid_argument(std::string(field) + " must be a number");
+  }
+  const double value = object.at(field).get<double>();
+  if (!std::isfinite(value) || value < 0.0) {
+    throw std::invalid_argument(std::string(field) +
+                                " must be nonnegative and finite");
+  }
+  return value;
+}
+
 void knownFields(const Json &object,
                  const std::unordered_set<std::string> &allowed,
                  const std::string &location) {
@@ -89,7 +106,8 @@ Config loadConfig(const std::string &path) {
   const Json document = Json::parse(input);
   knownFields(document,
               {"version", "robot_prefix", "control_rate_hz", "odom_timeout_s",
-               "scan_timeout_s", "footprint_radius", "obstacle_margin",
+               "scan_timeout_s", "scan_ignore_radius", "footprint_radius",
+               "obstacle_margin",
                "progress_timeout_s", "avoidance", "scan_offset", "localization",
                "limits"},
               "config");
@@ -116,6 +134,8 @@ Config loadConfig(const std::string &path) {
   result.odomTimeoutSeconds = positiveNumber(document, "odom_timeout_s", 1.0);
   result.scanTimeoutSeconds =
       positiveNumber(document, "scan_timeout_s", result.scanTimeoutSeconds);
+  result.scanIgnoreRadius =
+      nonnegativeNumber(document, "scan_ignore_radius", result.scanIgnoreRadius);
   result.footprintRadius =
       positiveNumber(document, "footprint_radius", result.footprintRadius);
   result.obstacleMargin =
@@ -369,13 +389,15 @@ int run(const Config &config) {
               return;
             }
           }
-          auto points = zms::navigation::toWorld(
-              zms::navigation::scanToPoints(
-                  ranges, value.at("angle_min").get<double>(),
-                  value.at("angle_increment").get<double>(),
-                  value.at("range_min").get<double>(),
-                  value.at("range_max").get<double>()),
-              config.scanOffset);
+          auto points = zms::navigation::outsideRadius(
+              zms::navigation::toWorld(
+                  zms::navigation::scanToPoints(
+                      ranges, value.at("angle_min").get<double>(),
+                      value.at("angle_increment").get<double>(),
+                      value.at("range_min").get<double>(),
+                      value.at("range_max").get<double>()),
+                  config.scanOffset),
+              config.scanIgnoreRadius);
           double nearest = std::numeric_limits<double>::infinity();
           for (const auto &point : points) {
             if (point.x >= 0.0) {
@@ -443,6 +465,7 @@ int run(const Config &config) {
   std::optional<zms::navigation::Pose> pose;
   std::optional<double> nearestScan;
   std::vector<zms::navigation::Point2> scanPoints;
+  zms::navigation::ObstacleMemory obstacleMemory;
   enum class Recovery { None, Rotate, Backup };
   Recovery recovery = Recovery::None;
   bool blocked = false;
@@ -486,6 +509,9 @@ int run(const Config &config) {
 
   while (!stopRequested) {
     const auto now = Clock::now();
+    const double nowSeconds =
+        std::chrono::duration<double>(now.time_since_epoch()).count();
+    bool scanUpdated = false;
     std::deque<std::shared_ptr<Request>> requests;
     {
       std::lock_guard lock(mailbox.mutex);
@@ -501,6 +527,7 @@ int run(const Config &config) {
         mailbox.odometry.clear();
       }
       if (!mailbox.scans.empty()) {
+        scanUpdated = true;
         nearestScan = mailbox.scans.back().nearest;
         scanPoints = std::move(mailbox.scans.back().points);
         lastScan = mailbox.scans.back().received;
@@ -538,6 +565,10 @@ int run(const Config &config) {
       pose = config.localization && filter.initialized()
                  ? filter.toMap(*odomPose)
                  : *odomPose;
+    }
+    if (scanUpdated && pose) {
+      obstacleMemory.update(zms::navigation::toWorld(scanPoints, *pose),
+                            nowSeconds);
     }
     odomUpdated = false;
     for (const auto &request : requests) {
@@ -707,7 +738,7 @@ int run(const Config &config) {
         const double toCurrent =
             std::hypot(current.x - pose->x, current.y - pose->y);
         const auto obstacles = avoiding
-                                   ? zms::navigation::toWorld(scanPoints, *pose)
+                                   ? obstacleMemory.points(nowSeconds)
                                    : std::vector<zms::navigation::Point2>{};
         const bool directClear =
             avoiding && recovery == Recovery::None &&
@@ -759,19 +790,18 @@ int run(const Config &config) {
                                           *pose, route, waypointIndex,
                                           config.limits.lookaheadDistance)
                                     : waypointIndex;
-            std::vector<zms::contract::Waypoint> guide = {route[targetIndex]};
-            if (auto local = zms::navigation::planLocalPath(
-                    *pose, route[targetIndex], obstacles,
-                    config.footprintRadius + config.obstacleMargin,
-                    config.localWindowMeters)) {
-              guide = std::move(*local);
-            }
+            auto local = zms::navigation::planLocalPath(
+                *pose, route[targetIndex], obstacles,
+                config.footprintRadius + config.obstacleMargin,
+                config.localWindowMeters);
             const auto &stopPoint =
                 routePlannedFromMap ? route.back() : route[waypointIndex];
-            const auto plan = zms::navigation::chooseVelocity(
-                *pose, previous, obstacles, guide,
-                std::hypot(stopPoint.x - pose->x, stopPoint.y - pose->y),
-                config.limits, localConfig, elapsed);
+            const auto plan = local ? zms::navigation::chooseVelocity(
+                                          *pose, previous, obstacles, *local,
+                                          std::hypot(stopPoint.x - pose->x,
+                                                     stopPoint.y - pose->y),
+                                          config.limits, localConfig, elapsed)
+                                    : zms::navigation::LocalPlan{};
             const bool moving =
                 plan.found && (plan.target.linear > 0.01 ||
                                std::abs(plan.target.angular) > 0.05);

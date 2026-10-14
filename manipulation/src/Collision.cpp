@@ -84,6 +84,7 @@ CollisionModel CollisionModel::fromUrdf(const std::string &path,
 
   CollisionModel result;
   result.chain_ = chain;
+  result.padding_ = padding;
   for (const auto &[name, rootPose] : rootPoses) {
     const auto link = model->getLink(name);
     int anchor = -1;
@@ -115,7 +116,7 @@ CollisionModel CollisionModel::fromUrdf(const std::string &path,
         const auto &box =
             static_cast<const urdf::Box &>(*collision->geometry).dim;
         geometry.shape = makeShape(
-            ShapeKind::Box, Eigen::Vector3d(box.x, box.y, box.z), padding);
+            ShapeKind::Box, Eigen::Vector3d(box.x, box.y, box.z), padding / 2.0);
         break;
       }
       case urdf::Geometry::CYLINDER: {
@@ -123,7 +124,8 @@ CollisionModel CollisionModel::fromUrdf(const std::string &path,
             static_cast<const urdf::Cylinder &>(*collision->geometry);
         geometry.shape = makeShape(
             ShapeKind::Cylinder,
-            Eigen::Vector3d(cylinder.radius, cylinder.length, 0.0), padding);
+            Eigen::Vector3d(cylinder.radius, cylinder.length, 0.0),
+            padding / 2.0);
         break;
       }
       case urdf::Geometry::SPHERE: {
@@ -131,7 +133,7 @@ CollisionModel CollisionModel::fromUrdf(const std::string &path,
             static_cast<const urdf::Sphere &>(*collision->geometry);
         geometry.shape =
             makeShape(ShapeKind::Sphere,
-                      Eigen::Vector3d(sphere.radius, 0.0, 0.0), padding);
+                      Eigen::Vector3d(sphere.radius, 0.0, 0.0), padding / 2.0);
         break;
       }
       default:
@@ -188,7 +190,7 @@ void CollisionModel::setEnvironment(std::vector<EnvironmentObject> objects) {
       throw std::invalid_argument("environment object " + object.name +
                                   " has a negative size");
     }
-    shapes.push_back(makeShape(object.kind, object.size, 0.0));
+    shapes.push_back(makeShape(object.kind, object.size, padding_ / 2.0));
   }
   environment_ = std::move(objects);
   environmentShapes_ = std::move(shapes);

@@ -525,6 +525,84 @@ TEST(LocalPlanner, SteersAroundObstacleWithoutTouchingIt) {
   EXPECT_GE(closest, config.robotRadius + config.safetyMargin - 1e-6);
 }
 
+TEST(LocalPlanner, DetoursAroundBoxWithSelfHitsAndMemory) {
+  using namespace zms::navigation;
+  std::vector<Point2> scan = {{-0.12, 0.0}, {-0.12, 0.02}};
+  for (double y = -0.25; y <= 0.25; y += 0.025) {
+    scan.push_back({1.75, y});
+  }
+  const double scanIgnoreRadius = 0.45;
+  const auto filtered = outsideRadius(scan, scanIgnoreRadius);
+  ASSERT_EQ(filtered.size(), scan.size() - 2);
+  Pose pose;
+  const zms::contract::Waypoint goal{3.5, 0.0, 0.0};
+  const auto world = toWorld(filtered, pose);
+  EXPECT_FALSE(segmentClear(pose, goal, world, 0.55));
+  ASSERT_TRUE(planLocalPath(pose, goal, world, 0.55));
+
+  ObstacleMemory memory;
+  memory.update(world, 0.0);
+  memory.update({}, 1.0);
+  EXPECT_FALSE(memory.points(2.9).empty());
+  Limits limits;
+  limits.maxLinearSpeed = 0.4;
+  limits.maxAngularSpeed = 0.8;
+  limits.positionTolerance = 0.1;
+  LocalPlannerConfig config;
+  config.robotRadius = 0.45;
+  config.safetyMargin = 0.1;
+  Velocity velocity;
+  bool turned = false;
+  double closest = std::numeric_limits<double>::infinity();
+  for (int tick = 0; tick < 300; ++tick) {
+    SCOPED_TRACE(tick);
+    const double seconds = tick * 0.1;
+    if (tick < 40 || (tick >= 60 && tick < 100)) {
+      memory.update(world, seconds);
+    }
+    const auto obstacles = memory.points(seconds);
+    if (tick >= 40 && tick < 60) {
+      EXPECT_FALSE(obstacles.empty());
+    }
+    if (obstacles.empty()) {
+      break;
+    }
+    const auto path = planLocalPath(pose, goal, obstacles, 0.55);
+    ASSERT_TRUE(path) << pose.x << " " << pose.y << " " << pose.yaw << " "
+                      << clearanceAt(pose, world);
+    const auto plan = chooseVelocity(
+        pose, velocity, obstacles, *path,
+        std::hypot(goal.x - pose.x, goal.y - pose.y), limits, config, 0.1);
+    ASSERT_TRUE(plan.found);
+    velocity = plan.velocity;
+    turned |= std::abs(velocity.angular) > 0.05;
+    pose.x += velocity.linear * std::cos(pose.yaw) * 0.1;
+    pose.y += velocity.linear * std::sin(pose.yaw) * 0.1;
+    pose.yaw = normalizeAngle(pose.yaw + velocity.angular * 0.1);
+    closest = std::min(closest, clearanceAt(pose, world));
+    if (pose.x > 2.5) {
+      break;
+    }
+  }
+  EXPECT_TRUE(turned);
+  EXPECT_GT(pose.x, 2.5);
+  EXPECT_GE(closest, 0.55);
+  EXPECT_TRUE(memory.points(14.0).empty());
+}
+
+TEST(LocalPlanner, KeepsCloseReturnWithDefaultScanIgnoreRadius) {
+  using namespace zms::navigation;
+  const double scanIgnoreRadius = 0.0;
+  const auto scan = scanToPoints({0.1}, 0.0, 1.0, 0.0, 10.0);
+  const auto points = outsideRadius(scan, scanIgnoreRadius);
+  ASSERT_EQ(points.size(), 1);
+  EXPECT_NEAR(points.front().x, 0.1, 1e-9);
+  const Pose pose;
+  const zms::contract::Waypoint goal{2.0, 0.0, 0.0};
+  EXPECT_FALSE(segmentClear(pose, goal, points, 0.35));
+  EXPECT_FALSE(planLocalPath(pose, goal, points, 0.35));
+}
+
 TEST(LocalPlanner, StopsWhenFullyBlockedAndAllowsEscape) {
   std::vector<zms::navigation::Point2> wall;
   for (double y = -3.0; y <= 3.0; y += 0.05) {

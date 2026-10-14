@@ -43,6 +43,22 @@ std::vector<Point2> scanToPoints(const std::vector<double> &ranges,
 std::vector<Point2> toWorld(const std::vector<Point2> &robotPoints,
                             const Pose &pose);
 
+std::vector<Point2> outsideRadius(const std::vector<Point2> &points,
+                                  double radius);
+
+class ObstacleMemory {
+public:
+  void update(const std::vector<Point2> &points, double nowSeconds);
+  std::vector<Point2> points(double nowSeconds);
+
+private:
+  struct Entry {
+    Point2 point;
+    double seenSeconds;
+  };
+  std::vector<Entry> entries_;
+};
+
 double clearanceAt(const Pose &pose, const std::vector<Point2> &obstacles);
 
 bool segmentClear(const Pose &from, const contract::Waypoint &to,

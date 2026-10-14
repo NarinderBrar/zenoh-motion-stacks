@@ -1,0 +1,192 @@
+<?xml version="1.0"?>
+<robot name="Mobile_manipulator">
+  <robotlens_sim base="floating">
+    <actuator joint="left_front_wheel_joint" type="velocity" gain="15" effort="30"/>
+    <actuator joint="right_front_wheel_joint" type="velocity" gain="15" effort="30"/>
+    <actuator joint="left_rear_wheel_joint" type="velocity" gain="15" effort="30"/>
+    <actuator joint="right_rear_wheel_joint" type="velocity" gain="15" effort="30"/>
+    <actuator joint="arm_base_joint" type="position" gain="450" effort="90" lower="-3.05" upper="3.05"/>
+    <actuator joint="upper_arm_joint" type="position" gain="600" effort="120" lower="-1.9" upper="1.9"/>
+    <actuator joint="forearm_joint" type="position" gain="350" effort="70" lower="-2.5" upper="2.5"/>
+    <actuator joint="wrist_roll_joint" type="position" gain="125" effort="25" lower="-3.1" upper="3.1"/>
+    <actuator joint="wrist_pitch_joint" type="position" gain="100" effort="20" lower="-2" upper="2"/>
+    <actuator joint="tool_flange_joint" type="position" gain="60" effort="12" lower="-3.1" upper="3.1"/>
+    <actuator joint="left_finger_joint" type="position" gain="125" effort="25" lower="0" upper="0.035"/>
+    <actuator joint="right_finger_joint" type="position" gain="125" effort="25" lower="0" upper="0.035"/>
+  </robotlens_sim>
+  <link name="base_footprint"><inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.001"/><inertia ixx="1e-06" ixy="0" ixz="0" iyy="1e-06" iyz="0" izz="1e-06"/></inertial></link>
+  <joint name="base_footprint_joint" type="fixed"><parent link="base_footprint"/><child link="base_link"/><origin xyz="0 0 0.225" rpy="0 0 0"/></joint>
+  <link name="base_link">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="79.08732"/><inertia ixx="2.8214223445199997" ixy="0" ixz="0" iyy="4.633590108680001" iyz="0" izz="6.6399028852000015"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><box size="0.8 0.6 0.25"/></geometry><material name="material_1"><color rgba="0.2 0.22 0.25 1"/></material></visual>
+    <visual><origin xyz="0 0.3 0" rpy="0 0 0"/><geometry><box size="0.496 0.01 0.12"/></geometry><material name="material_2"><color rgba="0.12 0.45 0.85 1"/></material></visual>
+    <visual><origin xyz="0 -0.3 0" rpy="0 0 0"/><geometry><box size="0.496 0.01 0.12"/></geometry><material name="material_3"><color rgba="0.12 0.45 0.85 1"/></material></visual>
+    <visual><origin xyz="0.4 0 0" rpy="0 0 0"/><geometry><box size="0.01 0.402 0.12"/></geometry><material name="material_4"><color rgba="0.12 0.45 0.85 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><box size="0.7200000000000001 0.54 0.225"/></geometry></collision>
+    <collision><origin xyz="0 0.3 0" rpy="0 0 0"/><geometry><box size="0.4464 0.009000000000000001 0.108"/></geometry></collision>
+    <collision><origin xyz="0 -0.3 0" rpy="0 0 0"/><geometry><box size="0.4464 0.009000000000000001 0.108"/></geometry></collision>
+    <collision><origin xyz="0.4 0 0" rpy="0 0 0"/><geometry><box size="0.009000000000000001 0.3618 0.108"/></geometry></collision>
+  </link>
+  <link name="left_front_wheel">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="1.9668560644029456"/><inertia ixx="0.0055420506463979185" ixy="0" ixz="0" iyy="0.009855631299195266" iyz="0" izz="0.0055420506463979185"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.11" length="0.06"/></geometry><material name="material_5"><color rgba="0.07 0.07 0.08 1"/></material></visual>
+    <visual><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.060500000000000005" length="0.0648"/></geometry><material name="material_6"><color rgba="0.55 0.58 0.62 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.11" length="0.06"/></geometry></collision>
+    <collision><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.054450000000000005" length="0.05508"/></geometry></collision>
+  </link>
+  <link name="right_front_wheel">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="1.9668560644029456"/><inertia ixx="0.0055420506463979185" ixy="0" ixz="0" iyy="0.009855631299195266" iyz="0" izz="0.0055420506463979185"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.11" length="0.06"/></geometry><material name="material_7"><color rgba="0.07 0.07 0.08 1"/></material></visual>
+    <visual><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.060500000000000005" length="0.0648"/></geometry><material name="material_8"><color rgba="0.55 0.58 0.62 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.11" length="0.06"/></geometry></collision>
+    <collision><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.054450000000000005" length="0.05508"/></geometry></collision>
+  </link>
+  <link name="left_rear_wheel">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="1.9668560644029456"/><inertia ixx="0.0055420506463979185" ixy="0" ixz="0" iyy="0.009855631299195266" iyz="0" izz="0.0055420506463979185"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.11" length="0.06"/></geometry><material name="material_9"><color rgba="0.07 0.07 0.08 1"/></material></visual>
+    <visual><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.060500000000000005" length="0.0648"/></geometry><material name="material_10"><color rgba="0.55 0.58 0.62 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.11" length="0.06"/></geometry></collision>
+    <collision><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.054450000000000005" length="0.05508"/></geometry></collision>
+  </link>
+  <link name="right_rear_wheel">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="1.9668560644029456"/><inertia ixx="0.0055420506463979185" ixy="0" ixz="0" iyy="0.009855631299195266" iyz="0" izz="0.0055420506463979185"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.11" length="0.06"/></geometry><material name="material_11"><color rgba="0.07 0.07 0.08 1"/></material></visual>
+    <visual><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.060500000000000005" length="0.0648"/></geometry><material name="material_12"><color rgba="0.55 0.58 0.62 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.11" length="0.06"/></geometry></collision>
+    <collision><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.054450000000000005" length="0.05508"/></geometry></collision>
+  </link>
+  <link name="lidar_link">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.22107073344046016"/><inertia ixx="0.00042077856562707633" ixy="0" ixz="0" iyy="0.00042077856562707633" iyz="0" izz="0.00018554855052757584"/></inertial>
+    <visual><origin xyz="0 0 0.01" rpy="0 0 0"/><geometry><cylinder radius="0.038" length="0.02"/></geometry><material name="material_13"><color rgba="0.2 0.22 0.25 1"/></material></visual>
+    <visual><origin xyz="0 0 0.0425" rpy="0 0 0"/><geometry><cylinder radius="0.042" length="0.045"/></geometry><material name="material_14"><color rgba="0.05 0.08 0.12 1"/></material></visual>
+    <collision><origin xyz="0 0 0.01" rpy="0 0 0"/><geometry><cylinder radius="0.0342" length="0.017"/></geometry></collision>
+    <collision><origin xyz="0 0 0.0425" rpy="0 0 0"/><geometry><cylinder radius="0.0378" length="0.03825"/></geometry></collision>
+  </link>
+  <link name="imu_link">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.02"/><inertia ixx="1e-06" ixy="0" ixz="0" iyy="1e-06" iyz="0" izz="1.0530000000000001e-06"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><box size="0.03 0.03 0.012"/></geometry><material name="material_15"><color rgba="0.1 0.4 0.2 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><box size="0.027 0.027 0.0108"/></geometry></collision>
+  </link>
+  <link name="arm_base">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="1.3783737767625217"/><inertia ixx="0.008554532252032399" ixy="0" ixz="0" iyy="0.008554532252032399" iyz="0" izz="0.003876676247144592"/></inertial>
+    <visual><origin xyz="0 0 0.06" rpy="0 0 0"/><geometry><cylinder radius="0.075" length="0.12"/></geometry><material name="material_16"><color rgba="0.92 0.92 0.9 1"/></material></visual>
+    <collision><origin xyz="0 0 0.06" rpy="0 0 0"/><geometry><cylinder radius="0.0675" length="0.102"/></geometry></collision>
+  </link>
+  <link name="upper_arm">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="2.5511285233760175"/><inertia ixx="0.06043769662195852" ixy="0" ixz="0" iyy="0.060042804234076194" iyz="0" izz="0.004211656649764237"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.065" length="0.13"/></geometry><material name="material_17"><color rgba="0.92 0.92 0.9 1"/></material></visual>
+    <visual><origin xyz="0 0 0.1728535346309751" rpy="0 0 0"/><geometry><cylinder radius="0.045" length="0.3457070692619502"/></geometry><material name="material_18"><color rgba="0.95 0.45 0.1 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.0585" length="0.1105"/></geometry></collision>
+    <collision><origin xyz="0 0 0.1728535346309751" rpy="0 0 0"/><geometry><cylinder radius="0.0405" length="0.2938510088726577"/></geometry></collision>
+  </link>
+  <link name="forearm">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="1.5856081478521329"/><inertia ixx="0.001853231134642821" ixy="0" ixz="0" iyy="0.02987659805320897" iyz="0" izz="0.03004788545685201"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.055" length="0.11"/></geometry><material name="material_19"><color rgba="0.92 0.92 0.9 1"/></material></visual>
+    <visual><origin xyz="0.15364758633864456 0 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.038" length="0.3072951726772891"/></geometry><material name="material_20"><color rgba="0.95 0.45 0.1 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.0495" length="0.0935"/></geometry></collision>
+    <collision><origin xyz="0.15364758633864456 0 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.0342" length="0.26120089677569575"/></geometry></collision>
+  </link>
+  <link name="wrist_roll">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.22870794518133697"/><inertia ixx="0.00018296635614506958" ixy="0" ixz="0" iyy="0.0004650394885353852" iyz="0" izz="0.0004650394885353852"/></inertial>
+    <visual><origin xyz="0.035 0 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.04" length="0.07"/></geometry><material name="material_21"><color rgba="0.92 0.92 0.9 1"/></material></visual>
+    <collision><origin xyz="0.035 0 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.036000000000000004" length="0.059500000000000004"/></geometry></collision>
+  </link>
+  <link name="wrist_pitch">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.3332601486928053"/><inertia ixx="0.0002384029838861192" ixy="0" ixz="0" iyy="0.0003987969549272441" iyz="0" izz="0.0004007028544704219"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.04" length="0.07"/></geometry><material name="material_22"><color rgba="0.92 0.92 0.9 1"/></material></visual>
+    <visual><origin xyz="0.04 0 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.032" length="0.05"/></geometry><material name="material_23"><color rgba="0.95 0.45 0.1 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="-1.5707963267948963 0 0"/><geometry><cylinder radius="0.036000000000000004" length="0.059500000000000004"/></geometry></collision>
+    <collision><origin xyz="0.04 0 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.028800000000000003" length="0.0425"/></geometry></collision>
+  </link>
+  <link name="tool_flange">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.05002986300841746"/><inertia ixx="3.06432910926557e-05" ixy="0" ixz="0" iyy="2.1992293947450177e-05" iyz="0" izz="2.1992293947450177e-05"/></inertial>
+    <visual><origin xyz="0.01 0 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.035" length="0.02"/></geometry><material name="material_24"><color rgba="0.92 0.92 0.9 1"/></material></visual>
+    <collision><origin xyz="0.01 0 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.03150000000000001" length="0.017"/></geometry></collision>
+  </link>
+  <link name="gripper_palm">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.169"/><inertia ixx="0.0002732166666666667" ixy="0" ixz="0" iyy="0.00012534166666666667" iyz="0" izz="0.00032814166666666675"/></inertial>
+    <visual><origin xyz="0.02 0 0" rpy="0 0 0"/><geometry><box size="0.04 0.13 0.05"/></geometry><material name="material_25"><color rgba="0.2 0.22 0.25 1"/></material></visual>
+    <collision><origin xyz="0.02 0 0" rpy="0 0 0"/><geometry><box size="0.036000000000000004 0.117 0.045000000000000005"/></geometry></collision>
+  </link>
+  <link name="left_finger">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.02"/><inertia ixx="2.0147400000000002e-06" ixy="0" ixz="0" iyy="2.7982500000000005e-05" iyz="0" izz="2.754024000000001e-05"/></inertial>
+    <visual><origin xyz="0.035 0.006 0" rpy="0 0 0"/><geometry><box size="0.07 0.012 0.03"/></geometry><material name="material_26"><color rgba="0.92 0.92 0.9 1"/></material></visual>
+    <collision><origin xyz="0.035 0.006 0" rpy="0 0 0"/><geometry><box size="0.06300000000000001 0.0108 0.027"/></geometry></collision>
+  </link>
+  <link name="right_finger">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.02"/><inertia ixx="2.0147400000000002e-06" ixy="0" ixz="0" iyy="2.7982500000000005e-05" iyz="0" izz="2.754024000000001e-05"/></inertial>
+    <visual><origin xyz="0.035 -0.006 0" rpy="0 0 0"/><geometry><box size="0.07 0.012 0.03"/></geometry><material name="material_27"><color rgba="0.92 0.92 0.9 1"/></material></visual>
+    <collision><origin xyz="0.035 -0.006 0" rpy="0 0 0"/><geometry><box size="0.06300000000000001 0.0108 0.027"/></geometry></collision>
+  </link>
+  <link name="camera_mast">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.19297232874675302"/><inertia ixx="0.01135762762380108" ixy="0" ixz="0" iyy="0.01135762762380108" iyz="0" izz="2.1709386984009712e-05"/></inertial>
+    <visual><origin xyz="0 0 0.21" rpy="0 0 0"/><geometry><cylinder radius="0.015" length="0.42"/></geometry><material name="material_28"><color rgba="0.55 0.58 0.62 1"/></material></visual>
+    <collision><origin xyz="0 0 0.21" rpy="0 0 0"/><geometry><cylinder radius="0.0135" length="0.357"/></geometry></collision>
+  </link>
+  <link name="camera_link">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.13740000000000005"/><inertia ixx="0.0003015120833333333" ixy="0" ixz="0" iyy="2.9823333333333343e-05" iyz="0" izz="0.0003046045833333334"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><box size="0.035 0.16 0.035"/></geometry><material name="material_29"><color rgba="0.2 0.22 0.25 1"/></material></visual>
+    <visual><origin xyz="0.0185 0.04 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.012" length="0.006"/></geometry><material name="material_30"><color rgba="0.05 0.08 0.12 1"/></material></visual>
+    <visual><origin xyz="0.0185 -0.04 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.012" length="0.006"/></geometry><material name="material_31"><color rgba="0.05 0.08 0.12 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><box size="0.03150000000000001 0.14400000000000002 0.03150000000000001"/></geometry></collision>
+    <collision><origin xyz="0.0185 0.04 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.0108" length="0.0051"/></geometry></collision>
+    <collision><origin xyz="0.0185 -0.04 0" rpy="0 1.5707963267948966 0"/><geometry><cylinder radius="0.0108" length="0.0051"/></geometry></collision>
+  </link>
+  <joint name="left_front_wheel_joint" type="continuous"><parent link="base_link"/><child link="left_front_wheel"/><origin xyz="0.25000000000000006 0.33999999999999997 -0.115" rpy="0 0 0"/><axis xyz="0 1 0"/><limit effort="30" velocity="3"/><dynamics damping="1.5"/></joint>
+  <joint name="right_front_wheel_joint" type="continuous"><parent link="base_link"/><child link="right_front_wheel"/><origin xyz="0.25000000000000006 -0.33999999999999997 -0.115" rpy="0 0 0"/><axis xyz="0 1 0"/><limit effort="30" velocity="3"/><dynamics damping="1.5"/></joint>
+  <joint name="left_rear_wheel_joint" type="continuous"><parent link="base_link"/><child link="left_rear_wheel"/><origin xyz="-0.25000000000000006 0.33999999999999997 -0.115" rpy="0 0 0"/><axis xyz="0 1 0"/><limit effort="30" velocity="3"/><dynamics damping="1.5"/></joint>
+  <joint name="right_rear_wheel_joint" type="continuous"><parent link="base_link"/><child link="right_rear_wheel"/><origin xyz="-0.25000000000000006 -0.33999999999999997 -0.115" rpy="0 0 0"/><axis xyz="0 1 0"/><limit effort="30" velocity="3"/><dynamics damping="1.5"/></joint>
+  <joint name="lidar_link_joint" type="fixed"><parent link="base_link"/><child link="lidar_link"/><origin xyz="0.32 0 0.125" rpy="0 0 0"/></joint>
+  <joint name="imu_link_joint" type="fixed"><parent link="base_link"/><child link="imu_link"/><origin xyz="0 0 0" rpy="0 0 0"/></joint>
+  <joint name="arm_base_joint" type="revolute"><parent link="base_link"/><child link="arm_base"/><origin xyz="0 0 0.125" rpy="0 0 0"/><axis xyz="0 0 1"/><limit lower="-3.05" upper="3.05" effort="90" velocity="3"/><dynamics damping="4.5"/></joint>
+  <joint name="upper_arm_joint" type="revolute"><parent link="arm_base"/><child link="upper_arm"/><origin xyz="0 0 0.12" rpy="0 0 0"/><axis xyz="0 1 0"/><limit lower="-1.9" upper="1.9" effort="120" velocity="3"/><dynamics damping="6"/></joint>
+  <joint name="forearm_joint" type="revolute"><parent link="upper_arm"/><child link="forearm"/><origin xyz="0 0 0.3457070692619502" rpy="0 0 0"/><axis xyz="0 1 0"/><limit lower="-2.5" upper="2.5" effort="70" velocity="3"/><dynamics damping="3.5"/></joint>
+  <joint name="wrist_roll_joint" type="revolute"><parent link="forearm"/><child link="wrist_roll"/><origin xyz="0.3072951726772891 0 0" rpy="0 0 0"/><axis xyz="1 0 0"/><limit lower="-3.1" upper="3.1" effort="25" velocity="3"/><dynamics damping="1.25"/></joint>
+  <joint name="wrist_pitch_joint" type="revolute"><parent link="wrist_roll"/><child link="wrist_pitch"/><origin xyz="0.07 0 0" rpy="0 0 0"/><axis xyz="0 1 0"/><limit lower="-2" upper="2" effort="20" velocity="3"/><dynamics damping="1"/></joint>
+  <joint name="tool_flange_joint" type="revolute"><parent link="wrist_pitch"/><child link="tool_flange"/><origin xyz="0.07 0 0" rpy="0 0 0"/><axis xyz="1 0 0"/><limit lower="-3.1" upper="3.1" effort="12" velocity="3"/><dynamics damping="0.6000000000000001"/></joint>
+  <joint name="gripper_palm_joint" type="fixed"><parent link="tool_flange"/><child link="gripper_palm"/><origin xyz="0.02 0 0" rpy="0 0 0"/></joint>
+  <joint name="left_finger_joint" type="prismatic"><parent link="gripper_palm"/><child link="left_finger"/><origin xyz="0.04 0.025 0" rpy="0 0 0"/><axis xyz="0 1 0"/><limit lower="0" upper="0.035" effort="25" velocity="0.5"/><dynamics damping="1.25"/></joint>
+  <joint name="right_finger_joint" type="prismatic"><parent link="gripper_palm"/><child link="right_finger"/><origin xyz="0.04 -0.025 0" rpy="0 0 0"/><axis xyz="0 -1 0"/><limit lower="0" upper="0.035" effort="25" velocity="0.5"/><dynamics damping="1.25"/></joint>
+  <joint name="camera_mast_joint" type="fixed"><parent link="base_link"/><child link="camera_mast"/><origin xyz="-0.14 0 0.125" rpy="0 0 0"/></joint>
+  <joint name="camera_link_joint" type="fixed"><parent link="camera_mast"/><child link="camera_link"/><origin xyz="0.02 0 0.44" rpy="0 0 0"/></joint>
+  <gazebo>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController"><joint_name>arm_base_joint</joint_name><topic>Mobile_manipulator/arm_base_joint/cmd_pos</topic><p_gain>450</p_gain><cmd_max>90</cmd_max><cmd_min>-90</cmd_min></plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController"><joint_name>upper_arm_joint</joint_name><topic>Mobile_manipulator/upper_arm_joint/cmd_pos</topic><p_gain>600</p_gain><cmd_max>120</cmd_max><cmd_min>-120</cmd_min></plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController"><joint_name>forearm_joint</joint_name><topic>Mobile_manipulator/forearm_joint/cmd_pos</topic><p_gain>350</p_gain><cmd_max>70</cmd_max><cmd_min>-70</cmd_min></plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController"><joint_name>wrist_roll_joint</joint_name><topic>Mobile_manipulator/wrist_roll_joint/cmd_pos</topic><p_gain>125</p_gain><cmd_max>25</cmd_max><cmd_min>-25</cmd_min></plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController"><joint_name>wrist_pitch_joint</joint_name><topic>Mobile_manipulator/wrist_pitch_joint/cmd_pos</topic><p_gain>100</p_gain><cmd_max>20</cmd_max><cmd_min>-20</cmd_min></plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController"><joint_name>tool_flange_joint</joint_name><topic>Mobile_manipulator/tool_flange_joint/cmd_pos</topic><p_gain>60</p_gain><cmd_max>12</cmd_max><cmd_min>-12</cmd_min></plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController"><joint_name>left_finger_joint</joint_name><topic>Mobile_manipulator/left_finger_joint/cmd_pos</topic><p_gain>125</p_gain><cmd_max>25</cmd_max><cmd_min>-25</cmd_min></plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController"><joint_name>right_finger_joint</joint_name><topic>Mobile_manipulator/right_finger_joint/cmd_pos</topic><p_gain>125</p_gain><cmd_max>25</cmd_max><cmd_min>-25</cmd_min></plugin>
+  </gazebo>
+  <gazebo reference="lidar_link">
+      <sensor name="lidar" type="gpu_lidar">
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <topic>Mobile_manipulator/lidar_link</topic>
+        <lidar>
+          <scan><horizontal><samples>360</samples><resolution>1</resolution><min_angle>-3.14159</min_angle><max_angle>3.14159</max_angle></horizontal></scan>
+          <range><min>0.1</min><max>12</max><resolution>0.01</resolution></range>
+        </lidar>
+      </sensor>
+  </gazebo>
+  <gazebo reference="imu_link">
+      <sensor name="imu" type="imu">
+        <always_on>1</always_on>
+        <update_rate>100</update_rate>
+        <topic>Mobile_manipulator/imu_link</topic>
+      </sensor>
+  </gazebo>
+  <gazebo reference="camera_link">
+      <sensor name="camera" type="camera">
+        <always_on>1</always_on>
+        <update_rate>30</update_rate>
+        <topic>Mobile_manipulator/camera_link</topic>
+        <camera>
+          <horizontal_fov>1.047</horizontal_fov>
+          <image><width>640</width><height>480</height></image>
+          <clip><near>0.05</near><far>50</far></clip>
+        </camera>
+      </sensor>
+  </gazebo>
+</robot>

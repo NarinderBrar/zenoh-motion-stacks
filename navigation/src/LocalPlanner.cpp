@@ -59,6 +59,54 @@ std::vector<Point2> toWorld(const std::vector<Point2> &robotPoints,
   return world;
 }
 
+std::vector<Point2> outsideRadius(const std::vector<Point2> &points,
+                                  double radius) {
+  std::vector<Point2> filtered;
+  filtered.reserve(points.size());
+  for (const auto &point : points) {
+    if (std::hypot(point.x, point.y) >= radius) {
+      filtered.push_back(point);
+    }
+  }
+  return filtered;
+}
+
+void ObstacleMemory::update(const std::vector<Point2> &points,
+                            double nowSeconds) {
+  this->points(nowSeconds);
+  for (const auto &point : points) {
+    auto match =
+        std::find_if(entries_.begin(), entries_.end(), [&](const Entry &entry) {
+          return std::hypot(entry.point.x - point.x, entry.point.y - point.y) <
+                 0.08;
+        });
+    if (match != entries_.end()) {
+      match->seenSeconds = nowSeconds;
+    } else {
+      entries_.push_back({point, nowSeconds});
+    }
+  }
+  if (entries_.size() > 1024) {
+    std::nth_element(entries_.begin(), entries_.begin() + 1024, entries_.end(),
+                     [](const Entry &a, const Entry &b) {
+                       return a.seenSeconds > b.seenSeconds;
+                     });
+    entries_.resize(1024);
+  }
+}
+
+std::vector<Point2> ObstacleMemory::points(double nowSeconds) {
+  std::erase_if(entries_, [&](const Entry &entry) {
+    return nowSeconds - entry.seenSeconds > 3.0;
+  });
+  std::vector<Point2> result;
+  result.reserve(entries_.size());
+  for (const auto &entry : entries_) {
+    result.push_back(entry.point);
+  }
+  return result;
+}
+
 double clearanceAt(const Pose &pose, const std::vector<Point2> &obstacles) {
   double nearest = std::numeric_limits<double>::infinity();
   for (const auto &point : obstacles) {
@@ -294,7 +342,7 @@ planLocalPath(const Pose &pose, const contract::Waypoint &target,
     goal.x = pose.x + dx * limit / largest;
     goal.y = pose.y + dy * limit / largest;
   }
-  for (const double extra : {0.10, 0.06, 0.02}) {
+  for (const double extra : {0.10, 0.06, 0.02, 0.0}) {
     try {
       return planGrid(grid, pose, goal, clearance + extra);
     } catch (const std::exception &) {
