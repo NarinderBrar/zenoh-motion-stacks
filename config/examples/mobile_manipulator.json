@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "robot_prefix": "demo/robot1",
+  "urdf_path": "mobile_manipulator.urdf",
+  "base_frame": "base_link",
+  "eef_frame": "tool_flange",
+  "control_rate_hz": 20,
+  "state_timeout_s": 1.0,
+  "tracking_error": 0.5,
+  "position_tolerance": 0.05,
+  "max_acceleration": 1.0,
+  "planning": {
+    "max_time_s": 2.0,
+    "collision_padding": 0.01,
+    "ik_position_tolerance": 0.003,
+    "ik_orientation_tolerance": 0.02,
+    "settle_timeout_s": 2.0,
+    "environment": [
+      {"name": "table", "type": "box", "size": [0.6, 0.8, 0.05], "position": [0.75, 0.0, 0.3]}
+    ]
+  }
+}

@@ -16,7 +16,7 @@ All keys below are relative to the configured robot prefix. A prefix has no lead
 | `odom` | subscribe | Base pose |
 | `scan` | subscribe | Optional 2D range scan; forward obstacle stop |
 | `map` | subscribe | Optional occupancy grid for A* planning |
-| `manipulation/target` | queryable | Submit a joint target; pose targets currently return `unsupported` |
+| `manipulation/target` | queryable | Submit a joint or end-effector pose target |
 | `manipulation/cancel` | queryable | Cancel an owned manipulation command |
 | `manipulation/status` | queryable | Current state, version, and supported features |
 | `manipulation/feedback` | publish | Joint execution progress and tracking error |
@@ -63,4 +63,4 @@ The queryable reply, cancel request, command ownership rules, states, and termin
 
 `scan` is a JSON object with `contract`, finite `angle_min`, positive `angle_increment`, nonnegative `range_min`, positive `range_max`, and a `ranges` array in meters. A JSON `null` range means no return. The server considers valid returns in the forward half-plane; a reading inside the configured clearance stops motion. `map` is a JSON object with `contract`, positive integer `width` and `height`, positive `resolution` in meters per cell, `origin` with finite `x`, `y`, and `yaw`, and a row-major `data` array of length `width * height`. Cells are `-1` for unknown or 0 to 100 for occupancy probability. The server plans through cells below 50 and inflates blocked cells by the configured footprint radius plus margin. A map received after a goal starts applies to the next goal.
 
-The current manipulation server accepts direct joint targets when `joint_states` is fresh and contains every joint of the configured URDF chain. It rejects pose targets with `unsupported`, out-of-limit targets with `invalid_target`, and targets received before valid joint state with `state_unavailable`. Execution failures include `stale_joint_states` and `tracking_error`; shutdown reports `shutdown`. Cancel currently commands the measured joint positions immediately. The planned jerk-limited stop, IK, and collision planning are not implemented yet.
+The manipulation server accepts targets when `joint_states` is fresh and contains every joint of the configured URDF chain. Pose targets are in the configured base frame; frame overrides that differ from the configuration are rejected with `unsupported`. An accepted reply also carries `joints`, the planned goal configuration as `name` and `position` arrays. Rejection reasons are `invalid_target` (outside limits or in collision), `unreachable` (no collision-free inverse kinematics solution), `state_unavailable`, `busy`, and `not_owner`. While the path is planned, status reports `pending`. Failure reasons are `start_in_collision`, `planning_failed`, `goal_not_reached`, `stale_joint_states`, `tracking_error`, and `shutdown`. Cancel commands the measured joint positions immediately.

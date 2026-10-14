@@ -40,3 +40,5 @@ if(NOT TARGET zenohcxx::zenohc)
 endif()
 
 find_package(urdfdom 4.0 REQUIRED)
+find_package(Eigen3 3.4 REQUIRED NO_MODULE)
+find_package(fcl 0.7 REQUIRED)

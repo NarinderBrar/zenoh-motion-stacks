@@ -1,6 +1,9 @@
 #include <zms/contract/Contract.hpp>
+#include <zms/manipulation/Collision.hpp>
 #include <zms/manipulation/JointModel.hpp>
 #include <zms/manipulation/JointMotion.hpp>
+#include <zms/manipulation/Kinematics.hpp>
+#include <zms/manipulation/Planner.hpp>
 #include <zms/navigation/GridPlanner.hpp>
 #include <zms/navigation/Navigation.hpp>
 #include <zms/navigation/PlanningWorker.hpp>
@@ -11,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <numbers>
+#include <random>
 #include <stop_token>
 #include <thread>
 
@@ -187,6 +191,174 @@ TEST(PlanningWorker, ReportsSubmittedWaypointForEachRoutePoint) {
                          outcome->waypointIndices.begin() - 1;
   EXPECT_DOUBLE_EQ(outcome->route[firstGoal].x, 5.5);
   EXPECT_DOUBLE_EQ(outcome->route[firstGoal].y, 3.5);
+}
+
+namespace {
+
+const char *mobileManipulator = "config/examples/mobile_manipulator.urdf";
+
+std::vector<double> armHome() { return std::vector<double>(6, 0.0); }
+
+}
+
+TEST(Kinematics, ForwardKinematicsMatchesPlanarArm) {
+  const auto chain = zms::manipulation::KinematicChain::fromUrdf(
+      "config/examples/two_joint_arm.urdf", "base", "tool");
+  ASSERT_EQ(chain.jointCount(), 2);
+  const auto pose = chain.forward({std::numbers::pi / 2.0, 0.0});
+  EXPECT_NEAR(pose.translation().x(), 0.0, 1e-9);
+  EXPECT_NEAR(pose.translation().y(), 0.3, 1e-9);
+  EXPECT_NEAR(pose.translation().z(), 0.2, 1e-9);
+}
+
+TEST(Kinematics, JacobianMatchesFiniteDifferences) {
+  const auto chain = zms::manipulation::KinematicChain::fromUrdf(
+      mobileManipulator, "base_link", "tool_flange");
+  const std::vector<double> q = {0.3, -0.4, 0.7, 0.2, 0.5, -0.3};
+  const auto j = chain.jacobian(q);
+  const double step = 1e-6;
+  for (std::size_t index = 0; index < q.size(); ++index) {
+    auto plus = q;
+    auto minus = q;
+    plus[index] += step;
+    minus[index] -= step;
+    const Eigen::Vector3d linear = (chain.forward(plus).translation() -
+                                    chain.forward(minus).translation()) /
+                                   (2.0 * step);
+    const Eigen::Vector3d angular =
+        zms::manipulation::orientationError(chain.forward(plus).linear(),
+                                            chain.forward(minus).linear()) /
+        (2.0 * step);
+    EXPECT_LT((linear - j.block<3, 1>(0, index)).norm(), 1e-5);
+    EXPECT_LT((angular - j.block<3, 1>(3, index)).norm(), 1e-5);
+  }
+}
+
+TEST(Kinematics, InverseKinematicsRecoversReachablePoses) {
+  const auto chain = zms::manipulation::KinematicChain::fromUrdf(
+      mobileManipulator, "base_link", "tool_flange");
+  const auto model = zms::manipulation::JointModel::fromUrdf(
+      mobileManipulator, "base_link", "tool_flange");
+  std::mt19937 random(7);
+  int solved = 0;
+  for (int trial = 0; trial < 20; ++trial) {
+    std::vector<double> q;
+    for (const auto &joint : model.joints()) {
+      std::uniform_real_distribution<double> range(joint.lower * 0.8,
+                                                   joint.upper * 0.8);
+      q.push_back(range(random));
+    }
+    const auto target = chain.forward(q);
+    zms::manipulation::IkOptions options;
+    options.seed = static_cast<unsigned>(trial + 1);
+    const auto solution =
+        chain.solveIk(target, armHome(), model.joints(), options);
+    if (!solution) {
+      continue;
+    }
+    ++solved;
+    const auto reached = chain.forward(*solution);
+    EXPECT_LT((reached.translation() - target.translation()).norm(), 0.003);
+    EXPECT_LT(
+        zms::manipulation::orientationError(target.linear(), reached.linear())
+            .norm(),
+        0.011);
+  }
+  EXPECT_GE(solved, 18);
+  zms::manipulation::IkOptions options;
+  Eigen::Isometry3d far = Eigen::Isometry3d::Identity();
+  far.translation() = Eigen::Vector3d(5.0, 0.0, 0.0);
+  EXPECT_FALSE(chain.solveIk(far, armHome(), model.joints(), options));
+}
+
+TEST(Collision, DetectsSelfAndEnvironmentCollisions) {
+  const auto chain = zms::manipulation::KinematicChain::fromUrdf(
+      mobileManipulator, "base_link", "tool_flange");
+  auto collision = zms::manipulation::CollisionModel::fromUrdf(
+      mobileManipulator, "base_link", chain, armHome(), 0.0);
+  EXPECT_GT(collision.robotGeometryCount(), 10U);
+  EXPECT_GT(collision.selfPairCount(), 0U);
+  EXPECT_FALSE(collision.inCollision(armHome()));
+  EXPECT_FALSE(collision.inCollision({0.8, 0.3, 0.5, 0.5, 0.4, 0.3}));
+  std::string detail;
+  EXPECT_TRUE(collision.inCollision({0.0, -1.9, -2.0, 0.0, 0.0, 0.0}, &detail));
+  EXPECT_FALSE(detail.empty());
+  const auto tip = chain.forward({0.8, 0.3, 0.5, 0.5, 0.4, 0.3});
+  zms::manipulation::EnvironmentObject block;
+  block.name = "block";
+  block.size = Eigen::Vector3d(0.1, 0.1, 0.1);
+  block.pose.translation() = tip.translation();
+  collision.setEnvironment({block});
+  EXPECT_TRUE(collision.inCollision({0.8, 0.3, 0.5, 0.5, 0.4, 0.3}, &detail));
+  EXPECT_NE(detail.find("block"), std::string::npos);
+}
+
+TEST(Planner, FindsCollisionFreePathAroundObstacle) {
+  const auto chain = zms::manipulation::KinematicChain::fromUrdf(
+      mobileManipulator, "base_link", "tool_flange");
+  const auto model = zms::manipulation::JointModel::fromUrdf(
+      mobileManipulator, "base_link", "tool_flange");
+  auto collision = zms::manipulation::CollisionModel::fromUrdf(
+      mobileManipulator, "base_link", chain, armHome(), 0.01);
+  const std::vector<double> start = {-1.2, 0.3, 0.5, 0.0, 0.4, 0.0};
+  const std::vector<double> goal = {1.2, 0.3, 0.5, 0.0, 0.4, 0.0};
+  const auto middle = chain.forward({0.0, 0.3, 0.5, 0.0, 0.4, 0.0});
+  zms::manipulation::EnvironmentObject post;
+  post.name = "post";
+  post.size = Eigen::Vector3d(0.12, 0.12, 0.12);
+  post.pose.translation() = middle.translation();
+  collision.setEnvironment({post});
+  const auto valid = [&](const std::vector<double> &q) {
+    return !collision.inCollision(q);
+  };
+  ASSERT_TRUE(valid(start));
+  ASSERT_TRUE(valid(goal));
+  ASSERT_FALSE(zms::manipulation::motionValid(start, goal, valid, 0.02));
+  zms::manipulation::PlannerOptions options;
+  options.maxSeconds = 5.0;
+  std::string error;
+  const auto path = zms::manipulation::planJointPath(
+      start, goal, model.joints(), valid, options, {}, &error);
+  ASSERT_TRUE(path.has_value()) << error;
+  EXPECT_EQ(path->front(), start);
+  EXPECT_EQ(path->back(), goal);
+  for (std::size_t index = 0; index + 1 < path->size(); ++index) {
+    EXPECT_TRUE(zms::manipulation::motionValid(
+        (*path)[index], (*path)[index + 1], valid, 0.02));
+  }
+  EXPECT_FALSE(zms::manipulation::planJointPath(
+      {0.0, -1.9, -2.0, 0.0, 0.0, 0.0}, goal, model.joints(), valid, options));
+}
+
+TEST(Planner, TrajectoryIsSynchronizedAndWithinLimits) {
+  const auto model = zms::manipulation::JointModel::fromUrdf(
+      mobileManipulator, "base_link", "tool_flange");
+  const zms::manipulation::JointPath path = {
+      {0, 0, 0, 0, 0, 0}, {1.0, 0.2, -0.5, 0, 0, 0}, {1.0, 0.2, -0.5, 1, 0, 0}};
+  const double acceleration = 1.5;
+  const auto trajectory =
+      zms::manipulation::timeParameterize(path, model.joints(), acceleration);
+  ASSERT_EQ(trajectory.times.size(), path.size());
+  EXPECT_GT(trajectory.duration(), 0.0);
+  EXPECT_EQ(trajectory.sample(0.0), path.front());
+  EXPECT_EQ(trajectory.sample(trajectory.duration() + 1.0), path.back());
+  const double dt = 0.001;
+  std::vector<double> previous = trajectory.sample(0.0);
+  std::vector<double> previousVelocity(6, 0.0);
+  for (double t = dt; t <= trajectory.duration(); t += dt) {
+    const auto current = trajectory.sample(t);
+    for (std::size_t joint = 0; joint < current.size(); ++joint) {
+      const double velocity = (current[joint] - previous[joint]) / dt;
+      EXPECT_LE(std::abs(velocity), model.joints()[joint].velocity + 1e-3);
+      EXPECT_LE(std::abs(velocity - previousVelocity[joint]) / dt,
+                acceleration + 0.05);
+      previousVelocity[joint] = velocity;
+    }
+    previous = current;
+  }
+  const double middle = trajectory.times[1] / 2.0;
+  const auto halfway = trajectory.sample(middle);
+  EXPECT_NEAR(halfway[0] / 1.0, halfway[1] / 0.2, 1e-9);
 }
 
 TEST(Navigation, ReachesWaypointAndLimitsAcceleration) {

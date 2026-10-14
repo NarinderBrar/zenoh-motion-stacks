@@ -36,13 +36,13 @@ target_include_directories(zms_navigation_core PUBLIC
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(zms_navigation_core PUBLIC zms_contract)
 
-add_library(zms_manipulation_core manipulation/src/JointModel.cpp manipulation/src/JointMotion.cpp)
+add_library(zms_manipulation_core manipulation/src/JointModel.cpp manipulation/src/JointMotion.cpp manipulation/src/Kinematics.cpp manipulation/src/Collision.cpp manipulation/src/Planner.cpp)
 add_library(motion_stacks::manipulation_core ALIAS zms_manipulation_core)
 set_target_properties(zms_manipulation_core PROPERTIES EXPORT_NAME manipulation_core)
 target_include_directories(zms_manipulation_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/manipulation/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-target_link_libraries(zms_manipulation_core PUBLIC zms_contract PRIVATE urdfdom::urdf_parser)
+target_link_libraries(zms_manipulation_core PUBLIC zms_contract Eigen3::Eigen PRIVATE urdfdom::urdf_parser fcl)
 
 add_executable(zms_navigation navigation/src/main.cpp)
 target_link_libraries(zms_navigation PRIVATE zms_navigation_core zms_contract_transport)

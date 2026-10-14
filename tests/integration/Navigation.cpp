@@ -529,7 +529,23 @@ TEST(Integration, ManipulationJointWorkflow) {
                            zms::contract::toJson(zms::contract::Target{
                                "pose", "owner", zms::contract::PoseTarget{}}));
   EXPECT_FALSE(pose.at("accepted"));
-  EXPECT_EQ(pose.at("reason"), "unsupported");
+  EXPECT_EQ(pose.at("reason"), "unreachable");
+
+  zms::contract::PoseTarget reachable;
+  reachable.x = 0.3 * std::cos(0.4);
+  reachable.y = 0.3 * std::sin(0.4);
+  reachable.z = 0.2;
+  reachable.qz = std::sin(0.05);
+  reachable.qw = std::cos(0.05);
+  const auto posed = zms::contract::query(
+      session, targetKey,
+      zms::contract::toJson(
+          zms::contract::Target{"pose-goal", "owner", reachable}));
+  ASSERT_TRUE(posed.at("accepted")) << posed.dump();
+  const auto posedResult = observations.waitForResult("pose-goal", 5s);
+  ASSERT_TRUE(posedResult.has_value());
+  EXPECT_EQ(posedResult->at("state"), "succeeded");
+  EXPECT_TRUE(observations.waitForJoints(0.4, -0.3, 1s));
 
   ASSERT_TRUE(sendTarget("cancel-goal", "owner", -1.5, 1.5).at("accepted"));
   const auto busy = sendTarget("busy-goal", "other-client", 0.0, 0.0);

@@ -48,7 +48,7 @@ versions[json]=$(dependency_version JSON)
 versions[zenohc]=$(dependency_version ZENOHC)
 versions[zenohcxx]=$(dependency_version ZENOHCXX)
 
-packages=(build-essential cmake ninja-build libeigen3-dev liburdfdom-dev libompl-dev nlohmann-json3-dev libgtest-dev libzenohc-dev libzenohcpp-dev)
+packages=(build-essential cmake ninja-build libeigen3-dev liburdfdom-dev libfcl-dev libompl-dev nlohmann-json3-dev libgtest-dev libzenohc-dev libzenohcpp-dev)
 declare -A requirements=([nlohmann-json3-dev]="${versions[json]}" [libzenohc-dev]="${versions[zenohc]}" [libzenohcpp-dev]="${versions[zenohcxx]}")
 missing=()
 
