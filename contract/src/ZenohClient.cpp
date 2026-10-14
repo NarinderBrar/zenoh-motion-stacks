@@ -1,3 +1,4 @@
+#include <zms/contract/Contract.hpp>
 #include <zms/contract/ZenohClient.hpp>
 
 #include <atomic>
@@ -57,6 +58,43 @@ void publish(zenoh::Session &session, const std::string &key,
   options.encoding = zenoh::Encoding("application/json");
   session.put(zenoh::KeyExpr(key), zenoh::Bytes(payload.dump()),
               std::move(options));
+}
+
+nlohmann::json parseJson(const zenoh::Bytes &bytes, std::size_t maximumBytes) {
+  if (bytes.size() > maximumBytes) {
+    throw std::invalid_argument("payload exceeds configured bound");
+  }
+  return nlohmann::json::parse(bytes.as_string());
+}
+
+void reply(zenoh::Query &query, const std::string &key,
+           const nlohmann::json &payload) {
+  auto options = zenoh::Query::ReplyOptions::create_default();
+  options.encoding = zenoh::Encoding("application/json");
+  query.reply(zenoh::KeyExpr(key), zenoh::Bytes(payload.dump()),
+              std::move(options));
+}
+
+zenoh::Queryable<void> declareJsonQueryable(zenoh::Session &session,
+                                            const std::string &key,
+                                            QueryHandler handler,
+                                            std::size_t maximumBytes) {
+  return session.declare_queryable(
+      zenoh::KeyExpr(key),
+      [key, handler = std::move(handler), maximumBytes](zenoh::Query &query) {
+        nlohmann::json response;
+        try {
+          std::optional<nlohmann::json> payload;
+          if (auto bytes = query.get_payload()) {
+            payload = parseJson(bytes->get(), maximumBytes);
+          }
+          response = handler(payload);
+        } catch (const std::exception &error) {
+          response = rejected("", "", "invalid_request", error.what());
+        }
+        reply(query, key, response);
+      },
+      [] {});
 }
 
 }

@@ -42,3 +42,5 @@ endif()
 if(NOT TARGET zenohcxx::zenohc)
   message(FATAL_ERROR "zenoh-cpp ${ZMS_ZENOHCXX_VERSION} with zenoh-c backend is required")
 endif()
+
+find_package(urdfdom 4.0 REQUIRED)

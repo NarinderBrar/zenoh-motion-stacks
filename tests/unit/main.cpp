@@ -1,4 +1,5 @@
 #include <zms/contract/Contract.hpp>
+#include <zms/manipulation/JointModel.hpp>
 #include <zms/navigation/GridPlanner.hpp>
 #include <zms/navigation/Navigation.hpp>
 
@@ -82,6 +83,28 @@ TEST(Contract, RejectsUnsafeManipulationTargets) {
       "target-3", "client-1", zms::contract::JointTarget{{"joint_1"}, {0.0}}});
   request["base_frame"] = "base";
   EXPECT_THROW(zms::contract::parseTarget(request), std::invalid_argument);
+}
+
+TEST(Manipulation, LoadsUrdfChainAndChecksTargets) {
+  const auto model = zms::manipulation::JointModel::fromUrdf(
+      "config/examples/two_joint_arm.urdf", "base", "tool");
+  ASSERT_EQ(model.joints().size(), 2);
+  EXPECT_EQ(model.joints().front().name, "joint_1");
+  EXPECT_EQ(model.joints().back().name, "joint_2");
+  const auto positions = model.orderedPositions(
+      zms::contract::JointTarget{{"joint_2", "joint_1"}, {-0.2, 0.3}});
+  ASSERT_EQ(positions.size(), 2);
+  EXPECT_DOUBLE_EQ(positions.front(), 0.3);
+  EXPECT_DOUBLE_EQ(positions.back(), -0.2);
+  EXPECT_THROW(model.orderedPositions(zms::contract::JointTarget{
+                   {"joint_1", "joint_2"}, {2.0, 0.0}}),
+               std::invalid_argument);
+  EXPECT_THROW(model.orderedPositions(zms::contract::JointTarget{
+                   {"joint_1", "unknown"}, {0.0, 0.0}}),
+               std::invalid_argument);
+  EXPECT_THROW(zms::manipulation::JointModel::fromUrdf(
+                   "config/examples/two_joint_arm.urdf", "tool", "base"),
+               std::invalid_argument);
 }
 
 TEST(Navigation, ReachesWaypointAndLimitsAcceleration) {

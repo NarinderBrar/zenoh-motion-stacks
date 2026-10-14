@@ -16,14 +16,14 @@ All keys below are relative to the configured robot prefix. A prefix has no lead
 | `odom` | subscribe | Base pose |
 | `scan` | subscribe | Optional 2D range scan; forward obstacle stop |
 | `map` | subscribe | Optional occupancy grid for A* planning |
-| `manipulation/target` | queryable | Submit a pose or joint target; server pending |
-| `manipulation/cancel` | queryable | Cancel an owned manipulation command; server pending |
-| `manipulation/status` | queryable | State, version, and features; server pending |
-| `manipulation/feedback` | publish | Execution progress; server pending |
-| `manipulation/result` | publish | Terminal result; server pending |
-| `manipulation/alive` | liveliness token | Presence; server pending |
-| `cmd_joints` | publish | Joint command samples; server pending |
-| `joint_states` | subscribe | Joint positions and velocities; server pending |
+| `manipulation/target` | queryable | Submit a joint target; pose targets currently return `unsupported` |
+| `manipulation/cancel` | queryable | Cancel an owned manipulation command |
+| `manipulation/status` | queryable | Current state, version, and supported features |
+| `manipulation/feedback` | publish | Joint execution progress and tracking error |
+| `manipulation/result` | publish | Terminal command state |
+| `manipulation/alive` | liveliness token | Presence |
+| `cmd_joints` | publish | Joint command samples |
+| `joint_states` | subscribe | Joint positions and velocities |
 
 ## Navigation requests
 
@@ -63,4 +63,4 @@ The queryable reply, cancel request, command ownership rules, states, and termin
 
 `scan` is a JSON object with `contract`, finite `angle_min`, positive `angle_increment`, nonnegative `range_min`, positive `range_max`, and a `ranges` array in meters. A JSON `null` range means no return. The server considers valid returns in the forward half-plane; a reading inside the configured clearance stops motion. `map` is a JSON object with `contract`, positive integer `width` and `height`, positive `resolution` in meters per cell, `origin` with finite `x`, `y`, and `yaw`, and a row-major `data` array of length `width * height`. Cells are `-1` for unknown or 0 to 100 for occupancy probability. The server plans through cells below 50 and inflates blocked cells by the configured footprint radius plus margin. A map received after a goal starts applies to the next goal.
 
-The manipulation server is not implemented yet. The typed request codec in the contract library validates its target payloads now. A future conformance suite will verify server behavior against these fields.
+The current manipulation server accepts direct joint targets when `joint_states` is fresh and the named joints and positions match the configured URDF chain. It rejects pose targets with `unsupported`, out-of-limit targets with `invalid_target`, and targets received before valid joint state with `state_unavailable`. Execution failures include `stale_joint_states` and `tracking_error`; shutdown reports `shutdown`. Cancel currently commands the measured joint positions immediately. The planned jerk-limited stop, IK, and collision planning are not implemented yet.

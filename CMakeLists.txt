@@ -36,8 +36,19 @@ target_include_directories(zms_navigation_core PUBLIC
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(zms_navigation_core PUBLIC zms_contract)
 
+add_library(zms_manipulation_core manipulation/src/JointModel.cpp)
+add_library(motion_stacks::manipulation_core ALIAS zms_manipulation_core)
+set_target_properties(zms_manipulation_core PROPERTIES EXPORT_NAME manipulation_core)
+target_include_directories(zms_manipulation_core PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/manipulation/include>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+target_link_libraries(zms_manipulation_core PUBLIC zms_contract PRIVATE urdfdom::urdf_parser)
+
 add_executable(zms_navigation navigation/src/main.cpp)
-target_link_libraries(zms_navigation PRIVATE zms_navigation_core zenohcxx::zenohc)
+target_link_libraries(zms_navigation PRIVATE zms_navigation_core zms_contract_transport)
+
+add_executable(zms_manipulation manipulation/src/main.cpp)
+target_link_libraries(zms_manipulation PRIVATE zms_manipulation_core zms_contract_transport)
 
 add_executable(zms_cli tools/zms_cli/main.cpp)
 target_link_libraries(zms_cli PRIVATE zms_contract_transport)
@@ -46,12 +57,12 @@ add_executable(zms_mock_robot tools/zms_mock_robot/main.cpp)
 target_link_libraries(zms_mock_robot PRIVATE zms_contract zenohcxx::zenohc)
 
 if(ZMS_INSTALLABLE)
-install(TARGETS zms_contract zms_contract_transport zms_navigation_core zms_navigation zms_cli zms_mock_robot
+install(TARGETS zms_contract zms_contract_transport zms_navigation_core zms_manipulation_core zms_navigation zms_manipulation zms_cli zms_mock_robot
   EXPORT motion_stacksTargets
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(DIRECTORY contract/include/ navigation/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY contract/include/ navigation/include/ manipulation/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(EXPORT motion_stacksTargets
   FILE motion_stacksTargets.cmake
   NAMESPACE motion_stacks::
@@ -83,8 +94,9 @@ if(BUILD_TESTING)
   option(ZMS_ENABLE_LIVE_TESTS "Register native Zenoh integration tests" OFF)
   find_package(GTest REQUIRED)
   add_executable(zms_unit_tests tests/unit/main.cpp)
-  target_link_libraries(zms_unit_tests PRIVATE zms_navigation_core GTest::gtest_main)
+  target_link_libraries(zms_unit_tests PRIVATE zms_navigation_core zms_manipulation_core GTest::gtest_main)
   add_test(NAME zms_unit_tests COMMAND zms_unit_tests)
+  set_tests_properties(zms_unit_tests PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   add_executable(zms_conformance tests/conformance/main.cpp)
   target_link_libraries(zms_conformance PRIVATE zms_contract_transport GTest::gtest_main)
   add_test(NAME zms_conformance COMMAND zms_conformance)

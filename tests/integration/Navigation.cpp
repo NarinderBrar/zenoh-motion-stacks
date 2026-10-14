@@ -136,6 +136,37 @@ private:
   std::filesystem::path path_;
 };
 
+class TemporaryManipulationConfig {
+public:
+  TemporaryManipulationConfig(const std::string &prefix,
+                              const std::filesystem::path &repository,
+                              double trackingError = 0.4) {
+    path_ = std::filesystem::temp_directory_path() /
+            ("zms-manipulation-" + std::to_string(getpid()) + ".json");
+    std::ofstream output(path_);
+    output
+        << Json{{"version", 1},
+                {"robot_prefix", prefix},
+                {"urdf_path",
+                 (repository / "config/examples/two_joint_arm.urdf").string()},
+                {"base_frame", "base"},
+                {"eef_frame", "tool"},
+                {"tracking_error", trackingError}}
+               .dump();
+    if (!output) {
+      throw std::runtime_error("could not write manipulation configuration");
+    }
+  }
+  ~TemporaryManipulationConfig() {
+    std::error_code error;
+    std::filesystem::remove(path_, error);
+  }
+  const std::filesystem::path &path() const { return path_; }
+
+private:
+  std::filesystem::path path_;
+};
+
 class Observations {
 public:
   void result(const zenoh::Sample &sample) {
@@ -281,13 +312,14 @@ Json requestCancel(zenoh::Session &session, const std::string &prefix,
                                   commandId, "integration-client"}));
 }
 
-void waitForStack(zenoh::Session &session, const std::string &prefix) {
+void waitForStack(zenoh::Session &session, const std::string &prefix,
+                  const std::string &stack = "navigation") {
   const auto deadline = Clock::now() + 5s;
   while (Clock::now() < deadline) {
     try {
       const auto response = zms::contract::query(
-          session, zms::contract::key(prefix, "navigation/status"),
-          std::nullopt, 200ms);
+          session, zms::contract::key(prefix, stack + "/status"), std::nullopt,
+          200ms);
       if (response.value("contract", 0) == 1) {
         return;
       }
@@ -295,7 +327,7 @@ void waitForStack(zenoh::Session &session, const std::string &prefix) {
     }
     std::this_thread::sleep_for(50ms);
   }
-  throw std::runtime_error("navigation stack did not become ready");
+  throw std::runtime_error(stack + " stack did not become ready");
 }
 
 }
@@ -439,4 +471,134 @@ TEST(Integration, NavigationWorkflow) {
   ASSERT_TRUE(shutdown.has_value());
   EXPECT_EQ(shutdown->at("reason"), "shutdown");
   EXPECT_TRUE(observations.waitForZeroAfter(beforeShutdown, 2s));
+}
+
+TEST(Integration, ManipulationJointWorkflow) {
+  const auto executableDirectory =
+      std::filesystem::canonical("/proc/self/exe").parent_path();
+  const auto repository = executableDirectory.parent_path().parent_path();
+  const std::string prefix =
+      "manipulation-integration/" + std::to_string(getpid());
+  TemporaryManipulationConfig config(prefix, repository);
+  Process mock(executableDirectory / "zms_mock_robot",
+               {prefix, "--joints", "joint_1,joint_2"});
+  Process stack(executableDirectory / "zms_manipulation",
+                {"--config", config.path().string()});
+  zenoh::Session session(zenoh::Config::create_default());
+  Observations observations;
+  auto results = session.declare_subscriber(
+      zenoh::KeyExpr(zms::contract::key(prefix, "manipulation/result")),
+      [&](const zenoh::Sample &sample) { observations.result(sample); }, [] {});
+  auto states = session.declare_subscriber(
+      zenoh::KeyExpr(zms::contract::key(prefix, "joint_states")),
+      [&](const zenoh::Sample &sample) { observations.jointStates(sample); },
+      [] {});
+  waitForStack(session, prefix, "manipulation");
+  ASSERT_TRUE(observations.waitForJoints(0.0, 0.0, 5s));
+  const auto targetKey = zms::contract::key(prefix, "manipulation/target");
+  const auto sendTarget = [&](const std::string &commandId,
+                              const std::string &clientId, double first,
+                              double second) {
+    return zms::contract::query(
+        session, targetKey,
+        zms::contract::toJson(zms::contract::Target{
+            commandId, clientId,
+            zms::contract::JointTarget{{"joint_1", "joint_2"},
+                                       {first, second}}}));
+  };
+  Json response;
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    response = sendTarget("joint-goal", "owner", 0.5, -0.4);
+    if (response.value("accepted", false)) {
+      break;
+    }
+    std::this_thread::sleep_for(100ms);
+  }
+  ASSERT_TRUE(response.at("accepted")) << response.dump();
+  const auto reached = observations.waitForResult("joint-goal", 5s);
+  ASSERT_TRUE(reached.has_value());
+  EXPECT_EQ(reached->at("state"), "succeeded");
+  EXPECT_TRUE(observations.waitForJoints(0.5, -0.4, 1s));
+
+  const auto outside = sendTarget("outside", "owner", 2.0, 0.0);
+  EXPECT_FALSE(outside.at("accepted"));
+  EXPECT_EQ(outside.at("reason"), "invalid_target");
+
+  const auto pose =
+      zms::contract::query(session, targetKey,
+                           zms::contract::toJson(zms::contract::Target{
+                               "pose", "owner", zms::contract::PoseTarget{}}));
+  EXPECT_FALSE(pose.at("accepted"));
+  EXPECT_EQ(pose.at("reason"), "unsupported");
+
+  ASSERT_TRUE(sendTarget("cancel-goal", "owner", -1.5, 1.5).at("accepted"));
+  const auto busy = sendTarget("busy-goal", "other-client", 0.0, 0.0);
+  EXPECT_FALSE(busy.at("accepted"));
+  EXPECT_EQ(busy.at("reason"), "busy");
+  const auto cancel = zms::contract::query(
+      session, zms::contract::key(prefix, "manipulation/cancel"),
+      zms::contract::toJson(zms::contract::Cancel{"cancel-goal", "owner"}));
+  ASSERT_TRUE(cancel.at("accepted"));
+  const auto cancelled = observations.waitForResult("cancel-goal", 3s);
+  ASSERT_TRUE(cancelled.has_value());
+  EXPECT_EQ(cancelled->at("state"), "cancelled");
+
+  ASSERT_TRUE(sendTarget("stale-goal", "owner", 1.5, -1.5).at("accepted"));
+  mock.stop();
+  const auto stale = observations.waitForResult("stale-goal", 3s);
+  ASSERT_TRUE(stale.has_value());
+  EXPECT_EQ(stale->at("reason"), "stale_joint_states");
+  mock.start(executableDirectory / "zms_mock_robot",
+             {prefix, "--joints", "joint_1,joint_2"});
+  ASSERT_TRUE(observations.waitForJoints(0.0, 0.0, 3s));
+
+  ASSERT_TRUE(sendTarget("shutdown-goal", "owner", 1.5, -1.5).at("accepted"));
+  stack.stop();
+  const auto shutdown = observations.waitForResult("shutdown-goal", 3s);
+  ASSERT_TRUE(shutdown.has_value());
+  EXPECT_EQ(shutdown->at("reason"), "shutdown");
+}
+
+TEST(Integration, ManipulationTrackingFailure) {
+  const auto executableDirectory =
+      std::filesystem::canonical("/proc/self/exe").parent_path();
+  const auto repository = executableDirectory.parent_path().parent_path();
+  const std::string prefix = "tracking-integration/" + std::to_string(getpid());
+  TemporaryManipulationConfig config(prefix, repository, 0.05);
+  Process stack(executableDirectory / "zms_manipulation",
+                {"--config", config.path().string()});
+  zenoh::Session session(zenoh::Config::create_default());
+  Observations observations;
+  auto result = session.declare_subscriber(
+      zenoh::KeyExpr(zms::contract::key(prefix, "manipulation/result")),
+      [&](const zenoh::Sample &sample) { observations.result(sample); }, [] {});
+  const auto stateKey = zms::contract::key(prefix, "joint_states");
+  std::jthread states([&](std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      zms::contract::publish(session, stateKey,
+                             {{"contract", 1},
+                              {"name", Json::array({"joint_1", "joint_2"})},
+                              {"position", Json::array({0.0, 0.0})},
+                              {"velocity", Json::array({0.0, 0.0})}});
+      std::this_thread::sleep_for(20ms);
+    }
+  });
+  waitForStack(session, prefix, "manipulation");
+  Json response;
+  for (int attempt = 0; attempt < 10; ++attempt) {
+    response = zms::contract::query(
+        session, zms::contract::key(prefix, "manipulation/target"),
+        zms::contract::toJson(zms::contract::Target{
+            "tracking-goal", "owner",
+            zms::contract::JointTarget{{"joint_1", "joint_2"}, {0.5, 0.0}}}));
+    if (response.value("accepted", false)) {
+      break;
+    }
+    std::this_thread::sleep_for(100ms);
+  }
+  ASSERT_TRUE(response.at("accepted")) << response.dump();
+  const auto failure = observations.waitForResult("tracking-goal", 3s);
+  ASSERT_TRUE(failure.has_value());
+  EXPECT_EQ(failure->at("state"), "failed");
+  EXPECT_EQ(failure->at("reason"), "tracking_error");
 }

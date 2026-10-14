@@ -76,6 +76,68 @@ private:
   std::optional<zms::contract::Goal> active_;
 };
 
+class FakeManipulationEndpoint final : public Endpoint {
+public:
+  Json request(std::string_view suffix,
+               const std::optional<Json> &payload) override {
+    if (suffix == "manipulation/status") {
+      if (!active_) {
+        return {{"contract", 1},
+                {"state", "idle"},
+                {"stack_version", "fake"},
+                {"features", Json::array({"joint_target"})}};
+      }
+      auto response =
+          zms::contract::status(active_->commandId, active_->clientId,
+                                zms::contract::CommandState::Active);
+      response["stack_version"] = "fake";
+      response["features"] = Json::array({"joint_target"});
+      return response;
+    }
+    if (!payload) {
+      return zms::contract::rejected("", "", "invalid_request",
+                                     "request payload is required");
+    }
+    try {
+      if (suffix == "manipulation/target") {
+        const auto target = zms::contract::parseTarget(*payload);
+        if (active_ && active_->clientId != target.clientId) {
+          return zms::contract::rejected(target.commandId, target.clientId,
+                                         "busy",
+                                         "another client owns the command");
+        }
+        if (!std::holds_alternative<zms::contract::JointTarget>(target.value)) {
+          return zms::contract::rejected(target.commandId, target.clientId,
+                                         "unsupported",
+                                         "pose targets are pending");
+        }
+        active_ = target;
+        return zms::contract::accepted(target.commandId, target.clientId);
+      }
+      if (suffix == "manipulation/cancel") {
+        const auto cancel = zms::contract::parseCancel(*payload);
+        if (!active_) {
+          return {{"contract", 1}, {"state", "idle"}};
+        }
+        if (active_->clientId != cancel.clientId ||
+            active_->commandId != cancel.commandId) {
+          return zms::contract::rejected(cancel.commandId, cancel.clientId,
+                                         "not_owner",
+                                         "command belongs to another client");
+        }
+        active_.reset();
+        return zms::contract::accepted(cancel.commandId, cancel.clientId);
+      }
+    } catch (const std::exception &error) {
+      return zms::contract::rejected("", "", "invalid_request", error.what());
+    }
+    return zms::contract::rejected("", "", "unknown_key", "unknown key");
+  }
+
+private:
+  std::optional<zms::contract::Target> active_;
+};
+
 class ZenohNavigationEndpoint final : public Endpoint {
 public:
   explicit ZenohNavigationEndpoint(std::string prefix)
@@ -98,6 +160,14 @@ std::unique_ptr<Endpoint> endpoint() {
     return std::make_unique<ZenohNavigationEndpoint>(prefix);
   }
   return std::make_unique<FakeNavigationEndpoint>();
+}
+
+std::unique_ptr<Endpoint> manipulationEndpoint() {
+  const char *prefix = std::getenv("ZMS_MANIPULATION_CONFORMANCE_PREFIX");
+  if (prefix && *prefix) {
+    return std::make_unique<ZenohNavigationEndpoint>(prefix);
+  }
+  return std::make_unique<FakeManipulationEndpoint>();
 }
 
 }
@@ -140,5 +210,48 @@ TEST(Conformance, NavigationOwnershipAndVersion) {
   const auto idle = stack->request("navigation/cancel",
                                    zms::contract::toJson(zms::contract::Cancel{
                                        "conformance-1", "conformance-owner"}));
+  EXPECT_EQ(idle.at("state"), "idle");
+}
+
+TEST(Conformance, ManipulationOwnershipAndVersion) {
+  auto stack = manipulationEndpoint();
+  const auto initial = stack->request("manipulation/status", std::nullopt);
+  EXPECT_EQ(initial.at("contract"), 1);
+  EXPECT_TRUE(initial.at("features").is_array());
+
+  const auto first = zms::contract::toJson(zms::contract::Target{
+      "conformance-joint-1", "conformance-owner",
+      zms::contract::JointTarget{{"joint_1", "joint_2"}, {1.5, -1.5}}});
+  const auto accepted = stack->request("manipulation/target", first);
+  ASSERT_TRUE(accepted.at("accepted").get<bool>());
+  EXPECT_EQ(accepted.at("command_id"), "conformance-joint-1");
+
+  const auto busy = stack->request(
+      "manipulation/target",
+      zms::contract::toJson(zms::contract::Target{
+          "conformance-joint-2", "another-client",
+          zms::contract::JointTarget{{"joint_1", "joint_2"}, {0.0, 0.0}}}));
+  ASSERT_FALSE(busy.at("accepted").get<bool>());
+  EXPECT_EQ(busy.at("reason"), "busy");
+
+  const auto notOwner = stack->request(
+      "manipulation/cancel", zms::contract::toJson(zms::contract::Cancel{
+                                 "conformance-joint-1", "another-client"}));
+  ASSERT_FALSE(notOwner.at("accepted").get<bool>());
+  EXPECT_EQ(notOwner.at("reason"), "not_owner");
+
+  auto wrongVersion = first;
+  wrongVersion["contract"] = 2;
+  const auto invalid = stack->request("manipulation/target", wrongVersion);
+  ASSERT_FALSE(invalid.at("accepted").get<bool>());
+  EXPECT_EQ(invalid.at("reason"), "invalid_request");
+
+  const auto cancelled = stack->request(
+      "manipulation/cancel", zms::contract::toJson(zms::contract::Cancel{
+                                 "conformance-joint-1", "conformance-owner"}));
+  EXPECT_TRUE(cancelled.at("accepted").get<bool>());
+  const auto idle = stack->request(
+      "manipulation/cancel", zms::contract::toJson(zms::contract::Cancel{
+                                 "conformance-joint-1", "conformance-owner"}));
   EXPECT_EQ(idle.at("state"), "idle");
 }

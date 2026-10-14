@@ -1,4 +1,5 @@
 #include <zms/contract/Contract.hpp>
+#include <zms/contract/ZenohClient.hpp>
 #include <zms/navigation/Navigation.hpp>
 #include <zms/navigation/PlanningWorker.hpp>
 
@@ -147,40 +148,12 @@ struct Mailbox {
   Json status = {{"contract", 1}, {"state", "idle"}};
 };
 
-Json parsePayload(const zenoh::Bytes &bytes, std::size_t maximumBytes = 65536) {
-  if (bytes.size() > maximumBytes) {
-    throw std::invalid_argument("payload exceeds configured bound");
-  }
-  return Json::parse(bytes.as_string());
-}
-
-zenoh::Session::PutOptions jsonOptions() {
-  auto options = zenoh::Session::PutOptions::create_default();
-  options.encoding = zenoh::Encoding("application/json");
-  return options;
-}
-
-zenoh::Query::ReplyOptions replyOptions() {
-  auto options = zenoh::Query::ReplyOptions::create_default();
-  options.encoding = zenoh::Encoding("application/json");
-  return options;
-}
-
-void publish(zenoh::Session &session, const std::string &key,
-             const Json &value) {
-  session.put(zenoh::KeyExpr(key), zenoh::Bytes(value.dump()), jsonOptions());
-}
-
-void reply(zenoh::Query &query, const std::string &key, const Json &value) {
-  query.reply(zenoh::KeyExpr(key), zenoh::Bytes(value.dump()), replyOptions());
-}
-
 void publishVelocity(zenoh::Session &session, const std::string &key,
                      const zms::navigation::Velocity &velocity) {
-  publish(session, key,
-          {{"contract", 1},
-           {"linear", velocity.linear},
-           {"angular", velocity.angular}});
+  zms::contract::publish(session, key,
+                         {{"contract", 1},
+                          {"linear", velocity.linear},
+                          {"angular", velocity.angular}});
 }
 
 void publishResult(zenoh::Session &session, const std::string &key,
@@ -188,9 +161,9 @@ void publishResult(zenoh::Session &session, const std::string &key,
                    zms::contract::CommandState state,
                    std::string_view reason = {},
                    std::string_view message = {}) {
-  publish(session, key,
-          zms::contract::status(goal.commandId, goal.clientId, state, reason,
-                                message));
+  zms::contract::publish(session, key,
+                         zms::contract::status(goal.commandId, goal.clientId,
+                                               state, reason, message));
 }
 
 int run(const Config &config) {
@@ -207,69 +180,57 @@ int run(const Config &config) {
   Mailbox mailbox;
   zms::navigation::PlanningWorker planner;
 
-  const auto commandCallback = [&](Request::Kind kind, const std::string &key) {
-    return [&, kind, key](zenoh::Query &query) {
-      Json response;
-      try {
-        const auto payload = query.get_payload();
-        if (!payload) {
-          throw std::invalid_argument("request payload is required");
-        }
-        auto request = std::make_shared<Request>();
-        request->kind = kind;
-        request->payload = parsePayload(payload->get());
-        if (kind == Request::Kind::Goal) {
-          zms::contract::parseGoal(request->payload);
-        } else {
-          zms::contract::parseCancel(request->payload);
-        }
-        auto future = request->reply.get_future();
-        {
-          std::lock_guard lock(mailbox.mutex);
-          if (mailbox.requests.size() >= 32) {
-            throw std::runtime_error("request queue is full");
-          }
-          mailbox.requests.push_back(std::move(request));
-        }
-        if (future.wait_for(std::chrono::seconds(2)) !=
-            std::future_status::ready) {
-          throw std::runtime_error("control loop did not answer in time");
-        }
-        response = future.get();
-      } catch (const std::exception &error) {
-        response =
-            zms::contract::rejected("", "", "invalid_request", error.what());
+  const auto commandCallback = [&](Request::Kind kind) {
+    return [&, kind](const std::optional<Json> &payload) -> Json {
+      if (!payload) {
+        throw std::invalid_argument("request payload is required");
       }
-      reply(query, key, response);
+      auto request = std::make_shared<Request>();
+      request->kind = kind;
+      request->payload = *payload;
+      if (kind == Request::Kind::Goal) {
+        zms::contract::parseGoal(request->payload);
+      } else {
+        zms::contract::parseCancel(request->payload);
+      }
+      auto future = request->reply.get_future();
+      {
+        std::lock_guard lock(mailbox.mutex);
+        if (mailbox.requests.size() >= 32) {
+          throw std::runtime_error("request queue is full");
+        }
+        mailbox.requests.push_back(std::move(request));
+      }
+      if (future.wait_for(std::chrono::seconds(2)) !=
+          std::future_status::ready) {
+        throw std::runtime_error("control loop did not answer in time");
+      }
+      return future.get();
     };
   };
 
-  auto goalQueryable = session.declare_queryable(
-      zenoh::KeyExpr(goalKey), commandCallback(Request::Kind::Goal, goalKey),
-      [] {});
-  auto cancelQueryable = session.declare_queryable(
-      zenoh::KeyExpr(cancelKey),
-      commandCallback(Request::Kind::Cancel, cancelKey), [] {});
-  auto statusQueryable = session.declare_queryable(
-      zenoh::KeyExpr(statusKey),
-      [&](zenoh::Query &query) {
+  auto goalQueryable = zms::contract::declareJsonQueryable(
+      session, goalKey, commandCallback(Request::Kind::Goal));
+  auto cancelQueryable = zms::contract::declareJsonQueryable(
+      session, cancelKey, commandCallback(Request::Kind::Cancel));
+  auto statusQueryable = zms::contract::declareJsonQueryable(
+      session, statusKey, [&](const std::optional<Json> &) {
         Json current;
         {
           std::lock_guard lock(mailbox.mutex);
           current = mailbox.status;
         }
         current["stack_version"] = "0.1.0";
-        current["features"] = Json::array({"waypoint_route",
-                                            "differential_drive",
-                                            "scan_obstacle_stop", "grid_astar"});
-        reply(query, statusKey, current);
-      },
-      [] {});
+        current["features"] =
+            Json::array({"waypoint_route", "differential_drive",
+                         "scan_obstacle_stop", "grid_astar"});
+        return current;
+      });
   auto odomSubscriber = session.declare_subscriber(
       zenoh::KeyExpr(endpoint("odom")),
       [&](const zenoh::Sample &sample) {
         try {
-          const Json value = parsePayload(sample.get_payload());
+          const Json value = zms::contract::parseJson(sample.get_payload());
           const zms::navigation::Pose pose{value.at("x").get<double>(),
                                            value.at("y").get<double>(),
                                            value.at("yaw").get<double>()};
@@ -290,7 +251,8 @@ int run(const Config &config) {
       zenoh::KeyExpr(endpoint("scan")),
       [&](const zenoh::Sample &sample) {
         try {
-          const Json value = parsePayload(sample.get_payload(), 1048576);
+          const Json value =
+              zms::contract::parseJson(sample.get_payload(), 1048576);
           if (!value.contains("contract") || value.at("contract") != 1 ||
               !value.contains("ranges") || !value.at("ranges").is_array() ||
               value.at("ranges").empty() || value.at("ranges").size() > 8192) {
@@ -325,7 +287,8 @@ int run(const Config &config) {
       zenoh::KeyExpr(endpoint("map")),
       [&](const zenoh::Sample &sample) {
         try {
-          const auto value = parsePayload(sample.get_payload(), 8388608);
+          const auto value =
+              zms::contract::parseJson(sample.get_payload(), 8388608);
           auto map = std::make_shared<zms::navigation::OccupancyGrid>(
               zms::navigation::parseGrid(value));
           std::lock_guard lock(mailbox.mutex);
@@ -489,7 +452,7 @@ int run(const Config &config) {
         feedback["x"] = pose->x;
         feedback["y"] = pose->y;
         feedback["yaw"] = pose->yaw;
-        publish(session, feedbackKey, feedback);
+        zms::contract::publish(session, feedbackKey, feedback);
       } else if (route.empty()) {
         publishVelocity(session, velocityKey, {});
         previous = {};
@@ -516,7 +479,7 @@ int run(const Config &config) {
           feedback["x"] = pose->x;
           feedback["y"] = pose->y;
           feedback["yaw"] = pose->yaw;
-          publish(session, feedbackKey, feedback);
+          zms::contract::publish(session, feedbackKey, feedback);
         }
       }
     }

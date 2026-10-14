@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "robot_prefix": "demo/robot1",
+  "urdf_path": "two_joint_arm.urdf",
+  "base_frame": "base",
+  "eef_frame": "tool",
+  "control_rate_hz": 20,
+  "state_timeout_s": 1.0,
+  "tracking_error": 0.4,
+  "position_tolerance": 0.02,
+  "max_acceleration": 2.0
+}
