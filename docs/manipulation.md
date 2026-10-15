@@ -27,7 +27,10 @@ With a `gripper` configuration block (`joints`, `open`, and `closed` positions, 
 
 `features` adds `cartesian_path` and, when configured, `gripper`. Not yet implemented: obstacles updated at runtime, mesh collision, and a jerk-limited stop on cancel.
 
-der development.
+## Visualization output
+
+When a target is accepted and its path planned, the stack publishes `manipulation/trajectory` (see `contract.md`): the planned joint trajectory as times and positions, downsampled to at most 200 points. For pose and Cartesian targets it also includes `eef_path`, the end-effector positions in the base frame from forward kinematics. The output is not gated by a config switch.
+
 
 Configuration version 1 requires `robot_prefix` (a string, which may be empty for unprefixed keys), `urdf_path`, `base_frame`, and `eef_frame`. Relative URDF paths resolve beside the JSON file. Optional fields are `control_rate_hz` (1 to 200, default 20), `state_timeout_s` (positive seconds, default 1), `tracking_error` (positive radians or meters, default 0.4), `position_tolerance` (positive radians or meters, default 0.02), and `max_acceleration` (positive radians or meters per second squared, default 2). Unknown fields are errors. Validate without starting Zenoh with `zms_manipulation --check-config config/examples/manipulation.json`; use `--version` to inspect supported contract and config versions.
 

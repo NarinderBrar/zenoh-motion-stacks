@@ -9,6 +9,8 @@
 #include <zms/navigation/Localization.hpp>
 #include <zms/navigation/Navigation.hpp>
 #include <zms/navigation/PlanningWorker.hpp>
+#include <zms/navigation/Visualization.hpp>
+#include <zms/manipulation/Visualization.hpp>
 
 #include <gtest/gtest.h>
 
@@ -866,3 +868,121 @@ TEST(GridPlanner, EndsAtExactGoalWithoutCellCenterBacktrack) {
     return std::abs(point.x - 2.1) < 0.001 && std::abs(point.y - 0.1) < 0.001;
   }));
 }
+
+
+TEST(Visualization, EncodesNavigationPathPayload) {
+  const std::vector<zms::contract::Waypoint> poses = {
+      {1.0, 2.0, 0.5}, {3.0, 4.0, -0.25}};
+  const auto payload = zms::navigation::posesToJson(poses);
+  ASSERT_TRUE(payload.is_array());
+  ASSERT_EQ(payload.size(), 2u);
+  EXPECT_EQ(payload.at(0).at("x"), 1.0);
+  EXPECT_EQ(payload.at(0).at("y"), 2.0);
+  EXPECT_EQ(payload.at(0).at("yaw"), 0.5);
+  EXPECT_EQ(payload.at(1).at("yaw"), -0.25);
+  EXPECT_TRUE(zms::navigation::posesToJson({}).empty());
+}
+
+TEST(Visualization, EncodesOccupancyGridInMapShape) {
+  zms::navigation::OccupancyGrid grid;
+  grid.width = 2;
+  grid.height = 3;
+  grid.resolution = 0.2;
+  grid.origin = {1.0, -1.0, 0.1};
+  grid.cells = {0, 100, -1, 0, 0, 100};
+  const auto payload = zms::navigation::gridToJson(grid);
+  EXPECT_EQ(payload.at("contract"), 1);
+  EXPECT_EQ(payload.at("width"), 2);
+  EXPECT_EQ(payload.at("height"), 3);
+  EXPECT_DOUBLE_EQ(payload.at("resolution").get<double>(), 0.2);
+  EXPECT_DOUBLE_EQ(payload.at("origin").at("x").get<double>(), 1.0);
+  EXPECT_DOUBLE_EQ(payload.at("origin").at("yaw").get<double>(), 0.1);
+  ASSERT_EQ(payload.at("data").size(), 6u);
+  EXPECT_EQ(payload.at("data").at(1), 100);
+  EXPECT_EQ(payload.at("data").at(2), -1);
+}
+
+TEST(Visualization, InflatesObstaclesByRadius) {
+  zms::navigation::OccupancyGrid grid;
+  grid.width = 7;
+  grid.height = 7;
+  grid.resolution = 1.0;
+  grid.origin = {0.0, 0.0, 0.0};
+  grid.cells.assign(49, 0);
+  grid.cells[3 * 7 + 3] = 100;
+  const auto inflated = zms::navigation::inflateGrid(grid, 1.0);
+  EXPECT_EQ(inflated.cells[3 * 7 + 3], 100);
+  EXPECT_EQ(inflated.cells[3 * 7 + 2], 100);
+  EXPECT_EQ(inflated.cells[2 * 7 + 3], 100);
+  EXPECT_EQ(inflated.cells[3 * 7 + 1], 0);
+  EXPECT_EQ(inflated.cells[0], 0);
+}
+
+TEST(Visualization, DownsamplesAboveCellLimit) {
+  zms::navigation::OccupancyGrid grid;
+  grid.width = 400;
+  grid.height = 400;
+  grid.resolution = 0.05;
+  grid.origin = {0.0, 0.0, 0.0};
+  grid.cells.assign(160000, 0);
+  grid.cells[200 * 400 + 200] = 100;
+  int stride = 1;
+  const auto reduced = zms::navigation::downsampleGrid(grid, 40000, stride);
+  EXPECT_GT(stride, 1);
+  EXPECT_LE(reduced.width * reduced.height, 40000);
+  EXPECT_DOUBLE_EQ(reduced.resolution, 0.05 * stride);
+  EXPECT_TRUE(zms::navigation::sameGrid(reduced, reduced));
+  EXPECT_FALSE(zms::navigation::sameGrid(reduced, grid));
+}
+
+TEST(Visualization, BuildsRollingWindowAroundRobot) {
+  const zms::navigation::Pose pose{5.0, 5.0, 0.0};
+  const std::vector<zms::navigation::Point2> obstacles = {{5.5, 5.0}};
+  const auto grid = zms::navigation::buildLocalWindowGrid(pose, 4.0, 0.05, 0.1,
+                                                          obstacles);
+  EXPECT_GT(grid.width, 0);
+  EXPECT_EQ(grid.width, grid.height);
+  EXPECT_DOUBLE_EQ(grid.resolution, 0.05);
+  EXPECT_LT(grid.origin.x, pose.x);
+  EXPECT_LT(grid.origin.y, pose.y);
+  bool marked = false;
+  for (const auto cell : grid.cells) {
+    marked = marked || cell == 100;
+  }
+  EXPECT_TRUE(marked);
+}
+
+TEST(Visualization, EncodesJointTrajectory) {
+  zms::manipulation::Trajectory trajectory;
+  trajectory.times = {0.0, 0.5, 1.0};
+  trajectory.points = {{0.0, 0.0}, {0.25, -0.1}, {0.5, -0.2}};
+  const std::vector<std::string> names = {"joint_1", "joint_2"};
+  const auto payload = zms::manipulation::trajectoryToJson("move-1", names,
+                                                           trajectory, false,
+                                                           nullptr);
+  EXPECT_EQ(payload.at("contract"), 1);
+  EXPECT_EQ(payload.at("command_id"), "move-1");
+  ASSERT_EQ(payload.at("name").size(), 2u);
+  ASSERT_EQ(payload.at("points").size(), 3u);
+  EXPECT_DOUBLE_EQ(payload.at("points").at(1).at("t").get<double>(), 0.5);
+  ASSERT_EQ(payload.at("points").at(2).at("position").size(), 2u);
+  EXPECT_FALSE(payload.contains("eef_path"));
+}
+
+TEST(Visualization, EncodesPoseTrajectoryWithEndEffectorPath) {
+  const auto chain = zms::manipulation::KinematicChain::fromUrdf(
+      "config/examples/two_joint_arm.urdf", "base", "tool");
+  zms::manipulation::Trajectory trajectory;
+  trajectory.times = {0.0, 1.0};
+  trajectory.points = {{0.0, 0.0}, {0.4, -0.3}};
+  const auto payload = zms::manipulation::trajectoryToJson(
+      "pose-1", {"joint_1", "joint_2"}, trajectory, true, &chain);
+  ASSERT_TRUE(payload.contains("eef_path"));
+  ASSERT_EQ(payload.at("eef_path").size(), 2u);
+  EXPECT_TRUE(payload.at("eef_path").at(0).contains("x"));
+  EXPECT_TRUE(payload.at("eef_path").at(0).contains("y"));
+  EXPECT_TRUE(payload.at("eef_path").at(0).contains("z"));
+  EXPECT_GT(payload.at("eef_path").at(1).at("y").get<double>(),
+            payload.at("eef_path").at(0).at("y").get<double>());
+}
+

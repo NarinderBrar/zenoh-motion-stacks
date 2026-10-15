@@ -218,6 +218,97 @@ public:
     }
   }
 
+  void path(const zenoh::Sample &sample) {
+    try {
+      const auto value = Json::parse(sample.get_payload().as_string());
+      if (!value.contains("contract") || value.at("contract") != 1 ||
+          !value.contains("poses") || !value.at("poses").is_array()) {
+        return;
+      }
+      std::lock_guard lock(mutex_);
+      ++pathCount_;
+      pathSizes_.push_back(value.at("poses").size());
+      ready_.notify_all();
+    } catch (const std::exception &) {
+    }
+  }
+
+  void costmap(const zenoh::Sample &sample) {
+    try {
+      const auto value = Json::parse(sample.get_payload().as_string());
+      if (!value.contains("width") || !value.contains("height") ||
+          !value.contains("data")) {
+        return;
+      }
+      std::lock_guard lock(mutex_);
+      ++costmapCount_;
+      costmapWidth_ = value.at("width").get<int>();
+      costmapHeight_ = value.at("height").get<int>();
+      costmapDataSize_ = value.at("data").size();
+      ready_.notify_all();
+    } catch (const std::exception &) {
+    }
+  }
+
+  void trajectory(const zenoh::Sample &sample) {
+    try {
+      const auto value = Json::parse(sample.get_payload().as_string());
+      if (!value.contains("contract") || value.at("contract") != 1 ||
+          !value.contains("points") || !value.at("points").is_array()) {
+        return;
+      }
+      std::lock_guard lock(mutex_);
+      ++trajectoryCount_;
+      trajectoryPoints_ = value.at("points").size();
+      trajectoryHasEef_ = value.contains("eef_path");
+      if (trajectoryHasEef_) {
+        ++eefTrajectoryCount_;
+      }
+      ready_.notify_all();
+    } catch (const std::exception &) {
+    }
+  }
+
+  bool waitForPathAfter(std::size_t before, std::chrono::seconds timeout) {
+    std::unique_lock lock(mutex_);
+    return ready_.wait_for(lock, timeout, [&] { return pathCount_ > before; });
+  }
+
+  bool waitForCostmapSize(int width, int height, std::chrono::seconds timeout) {
+    std::unique_lock lock(mutex_);
+    return ready_.wait_for(lock, timeout, [&] {
+      return costmapWidth_ == width && costmapHeight_ == height &&
+             costmapDataSize_ ==
+                 static_cast<std::size_t>(width) * height;
+    });
+  }
+
+  std::size_t pathCount() {
+    std::lock_guard lock(mutex_);
+    return pathCount_;
+  }
+
+  bool waitForTrajectory(std::chrono::seconds timeout) {
+    std::unique_lock lock(mutex_);
+    return ready_.wait_for(lock, timeout, [&] { return trajectoryCount_ > 0; });
+  }
+
+  bool waitForEefTrajectory(std::chrono::seconds timeout) {
+    std::unique_lock lock(mutex_);
+    return ready_.wait_for(lock, timeout,
+                           [&] { return eefTrajectoryCount_ > 0; });
+  }
+
+  bool trajectoryStayedBounded() {
+    std::lock_guard lock(mutex_);
+    return trajectoryPoints_ > 0 && trajectoryPoints_ <= 200;
+  }
+
+  bool trajectoryHasEndEffectorPath() {
+    std::lock_guard lock(mutex_);
+    return trajectoryHasEef_;
+  }
+
   std::optional<Json> waitForResult(const std::string &commandId,
                                     std::chrono::seconds timeout) {
     std::unique_lock lock(mutex_);
@@ -308,6 +399,16 @@ private:
   std::optional<Json> lastJointStates_;
   double maximumY_ = 0.0;
   std::size_t velocitySequence_ = 0;
+  std::size_t pathCount_ = 0;
+  std::vector<std::size_t> pathSizes_;
+  std::size_t costmapCount_ = 0;
+  int costmapWidth_ = 0;
+  int costmapHeight_ = 0;
+  std::size_t costmapDataSize_ = 0;
+  std::size_t trajectoryCount_ = 0;
+  std::size_t trajectoryPoints_ = 0;
+  std::size_t eefTrajectoryCount_ = 0;
+  bool trajectoryHasEef_ = false;
 };
 
 Json requestGoal(zenoh::Session &session, const std::string &prefix,
@@ -372,6 +473,13 @@ TEST(Integration, NavigationWorkflow) {
       zenoh::KeyExpr(zms::contract::key(prefix, "joint_states")),
       [&](const zenoh::Sample &sample) { observations.jointStates(sample); },
       [] {});
+  auto path = session.declare_subscriber(
+      zenoh::KeyExpr(zms::contract::key(prefix, "navigation/path")),
+      [&](const zenoh::Sample &sample) { observations.path(sample); }, [] {});
+  auto costmap = session.declare_subscriber(
+      zenoh::KeyExpr(zms::contract::key(prefix, "navigation/costmap")),
+      [&](const zenoh::Sample &sample) { observations.costmap(sample); },
+      [] {});
 
   waitForStack(session, prefix);
   ASSERT_TRUE(observations.waitForOdom(5s));
@@ -419,7 +527,10 @@ TEST(Integration, NavigationWorkflow) {
     mapAvailable = status.value("map_available", false);
   }
   ASSERT_TRUE(mapAvailable);
+  const auto pathBeforeMapGoal = observations.pathCount();
   ASSERT_TRUE(requestGoal(session, prefix, "map-goal", 2.0).at("accepted"));
+  EXPECT_TRUE(observations.waitForPathAfter(pathBeforeMapGoal, 5s));
+  EXPECT_TRUE(observations.waitForCostmapSize(20, 15, 5s));
   const auto mapResult = observations.waitForResult("map-goal", 30s);
   if (!mapResult) {
     const auto status = zms::contract::query(
@@ -634,6 +745,10 @@ TEST(Integration, ManipulationJointWorkflow) {
       zenoh::KeyExpr(zms::contract::key(prefix, "joint_states")),
       [&](const zenoh::Sample &sample) { observations.jointStates(sample); },
       [] {});
+  auto trajectory = session.declare_subscriber(
+      zenoh::KeyExpr(zms::contract::key(prefix, "manipulation/trajectory")),
+      [&](const zenoh::Sample &sample) { observations.trajectory(sample); },
+      [] {});
   waitForStack(session, prefix, "manipulation");
   ASSERT_TRUE(observations.waitForJoints(0.0, 0.0, 5s));
   const auto targetKey = zms::contract::key(prefix, "manipulation/target");
@@ -656,6 +771,9 @@ TEST(Integration, ManipulationJointWorkflow) {
     std::this_thread::sleep_for(100ms);
   }
   ASSERT_TRUE(response.at("accepted")) << response.dump();
+  EXPECT_TRUE(observations.waitForTrajectory(5s));
+  EXPECT_TRUE(observations.trajectoryStayedBounded());
+  EXPECT_FALSE(observations.trajectoryHasEndEffectorPath());
   const auto reached = observations.waitForResult("joint-goal", 5s);
   ASSERT_TRUE(reached.has_value());
   EXPECT_EQ(reached->at("state"), "succeeded");
@@ -689,6 +807,7 @@ TEST(Integration, ManipulationJointWorkflow) {
                            zms::contract::toJson(zms::contract::Target{
                                "pose-goal", "owner", reachable}));
   ASSERT_TRUE(posed.at("accepted")) << posed.dump();
+  EXPECT_TRUE(observations.waitForEefTrajectory(5s));
   const auto posedResult = observations.waitForResult("pose-goal", 5s);
   ASSERT_TRUE(posedResult.has_value());
   EXPECT_EQ(posedResult->at("state"), "succeeded");

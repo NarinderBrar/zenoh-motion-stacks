@@ -14,6 +14,8 @@ nlohmann::json
 query(zenoh::Session &session, const std::string &key,
       const std::optional<nlohmann::json> &payload,
       std::chrono::milliseconds timeout = std::chrono::milliseconds(3000));
+zenoh::Config sessionConfig();
+
 void publish(zenoh::Session &session, const std::string &key,
              const nlohmann::json &payload);
 nlohmann::json parseJson(const zenoh::Bytes &bytes,

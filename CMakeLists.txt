@@ -28,7 +28,7 @@ target_include_directories(zms_contract_transport PUBLIC
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(zms_contract_transport PUBLIC zms_contract zenohcxx::zenohc)
 
-add_library(zms_navigation_core navigation/src/Navigation.cpp navigation/src/GridPlanner.cpp navigation/src/PlanningWorker.cpp navigation/src/LocalPlanner.cpp navigation/src/Localization.cpp)
+add_library(zms_navigation_core navigation/src/Navigation.cpp navigation/src/GridPlanner.cpp navigation/src/PlanningWorker.cpp navigation/src/LocalPlanner.cpp navigation/src/Localization.cpp navigation/src/Visualization.cpp)
 add_library(motion_stacks::navigation_core ALIAS zms_navigation_core)
 set_target_properties(zms_navigation_core PROPERTIES EXPORT_NAME navigation_core)
 target_include_directories(zms_navigation_core PUBLIC
@@ -36,7 +36,7 @@ target_include_directories(zms_navigation_core PUBLIC
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(zms_navigation_core PUBLIC zms_contract)
 
-add_library(zms_manipulation_core manipulation/src/JointModel.cpp manipulation/src/JointMotion.cpp manipulation/src/Kinematics.cpp manipulation/src/Collision.cpp manipulation/src/Planner.cpp)
+add_library(zms_manipulation_core manipulation/src/JointModel.cpp manipulation/src/JointMotion.cpp manipulation/src/Kinematics.cpp manipulation/src/Collision.cpp manipulation/src/Planner.cpp manipulation/src/Visualization.cpp)
 add_library(motion_stacks::manipulation_core ALIAS zms_manipulation_core)
 set_target_properties(zms_manipulation_core PROPERTIES EXPORT_NAME manipulation_core)
 target_include_directories(zms_manipulation_core PUBLIC
@@ -54,7 +54,7 @@ add_executable(zms_cli tools/zms_cli/main.cpp)
 target_link_libraries(zms_cli PRIVATE zms_contract_transport)
 
 add_executable(zms_mock_robot tools/zms_mock_robot/main.cpp)
-target_link_libraries(zms_mock_robot PRIVATE zms_contract zenohcxx::zenohc)
+target_link_libraries(zms_mock_robot PRIVATE zms_contract zms_contract_transport zenohcxx::zenohc)
 
 if(ZMS_INSTALLABLE)
 install(TARGETS zms_contract zms_contract_transport zms_navigation_core zms_manipulation_core zms_navigation zms_manipulation zms_cli zms_mock_robot

@@ -1,4 +1,5 @@
 #include <zms/contract/Contract.hpp>
+#include <zms/contract/ZenohClient.hpp>
 
 #include <zenoh.hxx>
 
@@ -198,7 +199,7 @@ int main(int argc, char **argv) {
     const auto jointStateKey = zms::contract::key(prefix, "joint_states");
     const auto scanKey = zms::contract::key(prefix, "scan");
     const auto truthKey = zms::contract::key(prefix, "ground_truth");
-    zenoh::Session session(zenoh::Config::create_default());
+    zenoh::Session session(zms::contract::sessionConfig());
     State state;
     state.x = startX;
     state.y = startY;

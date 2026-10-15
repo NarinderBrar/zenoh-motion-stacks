@@ -4,9 +4,11 @@
 #include <zms/navigation/Localization.hpp>
 #include <zms/navigation/Navigation.hpp>
 #include <zms/navigation/PlanningWorker.hpp>
+#include <zms/navigation/Visualization.hpp>
 
 #include <zenoh.hxx>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -34,6 +36,12 @@ volatile std::sig_atomic_t stopRequested = 0;
 
 void requestStop(int) { stopRequested = 1; }
 
+struct VisualizationConfig {
+  bool enabled = true;
+  double costmapRateHz = 1.0;
+  double pathRateHz = 5.0;
+};
+
 struct Config {
   std::string robotPrefix;
   int controlRateHz = 20;
@@ -52,6 +60,7 @@ struct Config {
   int localizationParticles = 400;
   std::optional<zms::navigation::Pose> initialPose;
   zms::navigation::Limits limits;
+  VisualizationConfig visualization;
 };
 
 double positiveNumber(const Json &object, const char *field, double fallback) {
@@ -107,9 +116,8 @@ Config loadConfig(const std::string &path) {
   knownFields(document,
               {"version", "robot_prefix", "control_rate_hz", "odom_timeout_s",
                "scan_timeout_s", "scan_ignore_radius", "footprint_radius",
-               "obstacle_margin",
-               "progress_timeout_s", "avoidance", "scan_offset", "localization",
-               "limits"},
+               "obstacle_margin", "progress_timeout_s", "avoidance",
+               "scan_offset", "localization", "limits", "visualization"},
               "config");
   if (!document.contains("version") || document.at("version") != 1) {
     throw std::invalid_argument("config.version must be 1");
@@ -207,6 +215,22 @@ Config loadConfig(const std::string &path) {
                                      "config.localization.initial_pose");
     }
   }
+  if (document.contains("visualization")) {
+    const auto &viz = document.at("visualization");
+    knownFields(viz, {"enabled", "costmap_rate_hz", "path_rate_hz"},
+                "config.visualization");
+    if (viz.contains("enabled")) {
+      if (!viz.at("enabled").is_boolean()) {
+        throw std::invalid_argument(
+            "config.visualization.enabled must be a boolean");
+      }
+      result.visualization.enabled = viz.at("enabled").get<bool>();
+    }
+    result.visualization.costmapRateHz =
+        positiveNumber(viz, "costmap_rate_hz", result.visualization.costmapRateHz);
+    result.visualization.pathRateHz =
+        positiveNumber(viz, "path_rate_hz", result.visualization.pathRateHz);
+  }
   if (document.contains("limits")) {
     const auto &limits = document.at("limits");
     knownFields(limits,
@@ -276,7 +300,7 @@ void publishResult(zenoh::Session &session, const std::string &key,
 }
 
 int run(const Config &config) {
-  zenoh::Session session(zenoh::Config::create_default());
+  zenoh::Session session(zms::contract::sessionConfig());
   const auto endpoint = [&](std::string_view suffix) {
     return zms::contract::key(config.robotPrefix, suffix);
   };
@@ -286,8 +310,23 @@ int run(const Config &config) {
   const std::string feedbackKey = endpoint("navigation/feedback");
   const std::string resultKey = endpoint("navigation/result");
   const std::string velocityKey = endpoint("cmd_vel");
+  const std::string pathKey = endpoint("navigation/path");
+  const std::string localPathKey = endpoint("navigation/local_path");
+  const std::string costmapKey = endpoint("navigation/costmap");
+  const std::string obstaclesKey = endpoint("navigation/obstacles");
   Mailbox mailbox;
   zms::navigation::PlanningWorker planner;
+  const auto publishEmptyPaths = [&](const std::string &commandId) {
+    if (!config.visualization.enabled) {
+      return;
+    }
+    const Json empty = {{"contract", 1},
+                        {"command_id", commandId},
+                        {"frame", "map"},
+                        {"poses", Json::array()}};
+    zms::contract::publish(session, pathKey, empty);
+    zms::contract::publish(session, localPathKey, empty);
+  };
 
   const auto commandCallback = [&](Request::Kind kind) {
     return [&, kind](const std::optional<Json> &payload) -> Json {
@@ -497,6 +536,13 @@ int run(const Config &config) {
   const auto loopStarted = Clock::now();
   zms::navigation::Velocity previous;
   Clock::time_point commandStarted = Clock::now();
+  Clock::time_point lastPathPublish = Clock::time_point();
+  Clock::time_point lastLocalPathPublish = Clock::time_point();
+  Clock::time_point lastCostmapPublish = Clock::time_point();
+  Clock::time_point lastObstaclesPublish = Clock::time_point();
+  zms::navigation::OccupancyGrid lastPublishedCostmap;
+  bool hasPublishedCostmap = false;
+  std::vector<zms::contract::Waypoint> lastPublishedRoute;
   const auto submittedWaypointIndex = [&] {
     if (routePlannedFromMap && waypointIndex < routeWaypointIndices.size()) {
       return waypointOffset + routeWaypointIndices[waypointIndex];
@@ -589,6 +635,7 @@ int run(const Config &config) {
           publishResult(session, resultKey, *active,
                         zms::contract::CommandState::Cancelled, "replaced",
                         "replaced by owner");
+          publishEmptyPaths(active->commandId);
         }
         planner.cancel();
         active = incoming;
@@ -619,6 +666,7 @@ int run(const Config &config) {
           publishVelocity(session, velocityKey, {});
           publishResult(session, resultKey, *active,
                         zms::contract::CommandState::Cancelled);
+          publishEmptyPaths(active->commandId);
           active.reset();
           route.clear();
           planGeneration.reset();
@@ -647,6 +695,7 @@ int run(const Config &config) {
         publishResult(session, resultKey, *active,
                       zms::contract::CommandState::Failed, "planning_failed",
                       outcome->error);
+        publishEmptyPaths(active->commandId);
         active.reset();
         route.clear();
       } else {
@@ -668,6 +717,7 @@ int run(const Config &config) {
         publishResult(session, resultKey, *active,
                       zms::contract::CommandState::Failed, "stale_scan",
                       "scan stopped updating");
+        publishEmptyPaths(active->commandId);
         active.reset();
         route.clear();
         planGeneration.reset();
@@ -684,6 +734,7 @@ int run(const Config &config) {
         publishResult(session, resultKey, *active,
                       zms::contract::CommandState::Failed, "stale_odom",
                       "odometry is unavailable or stale");
+        publishEmptyPaths(active->commandId);
         active.reset();
         route.clear();
         planGeneration.reset();
@@ -703,6 +754,7 @@ int run(const Config &config) {
                       zms::contract::CommandState::Failed, "no_progress",
                       "no progress toward the current waypoint within "
                       "progress_timeout_s");
+        publishEmptyPaths(active->commandId);
         active.reset();
         route.clear();
         planGeneration.reset();
@@ -854,6 +906,7 @@ int run(const Config &config) {
         if (step.reached) {
           publishResult(session, resultKey, *active,
                         zms::contract::CommandState::Succeeded);
+          publishEmptyPaths(active->commandId);
           active.reset();
           route.clear();
           planGeneration.reset();
@@ -871,6 +924,89 @@ int run(const Config &config) {
                                                                 : "none";
           zms::contract::publish(session, feedbackKey, feedback);
         }
+      }
+    }
+    if (config.visualization.enabled) {
+      const auto pathPeriod = std::chrono::duration_cast<Clock::duration>(
+          std::chrono::duration<double>(1.0 /
+                                        std::max(0.1, config.visualization.pathRateHz)));
+      if (active && (route != lastPublishedRoute ||
+                     now - lastPathPublish > pathPeriod)) {
+        lastPathPublish = now;
+        lastPublishedRoute = route;
+        zms::contract::publish(session, pathKey,
+                               {{"contract", 1},
+                                {"command_id", active->commandId},
+                                {"frame", "map"},
+                                {"poses", zms::navigation::posesToJson(route)}});
+      }
+      if (active && now - lastLocalPathPublish > pathPeriod) {
+        lastLocalPathPublish = now;
+        std::vector<zms::contract::Waypoint> localRoute;
+        if (pose && (blocked || recovery != Recovery::None) && !route.empty()) {
+          if (routePlannedFromMap) {
+            const std::size_t startIndex = zms::navigation::lookaheadIndex(
+                *pose, route, waypointIndex, 0.0);
+            for (std::size_t i = startIndex;
+                 i < route.size() && i < startIndex + 64; ++i) {
+              localRoute.push_back(route[i]);
+            }
+          } else if (waypointIndex < route.size()) {
+            localRoute.push_back(route[waypointIndex]);
+          }
+        }
+        zms::contract::publish(session, localPathKey,
+                               {{"contract", 1},
+                                {"command_id", active->commandId},
+                                {"frame", "map"},
+                                {"poses", zms::navigation::posesToJson(localRoute)}});
+      }
+      const auto costmapPeriod = std::chrono::duration_cast<Clock::duration>(
+          std::chrono::duration<double>(
+              1.0 / std::max(0.1, config.visualization.costmapRateHz)));
+      if (now - lastCostmapPublish > costmapPeriod) {
+        lastCostmapPublish = now;
+        bool haveGrid = false;
+        zms::navigation::OccupancyGrid grid;
+        if (latestMap) {
+          grid = zms::navigation::inflateGrid(*latestMap,
+                             config.footprintRadius + config.obstacleMargin);
+          zms::navigation::markPoints(grid, obstacleMemory.points(nowSeconds));
+          haveGrid = true;
+        } else if (pose) {
+          const double resolution =
+              std::clamp(config.localWindowMeters / 200.0, 0.02, 0.1);
+          grid = zms::navigation::buildLocalWindowGrid(*pose, config.localWindowMeters,
+                                      resolution,
+                                      config.footprintRadius +
+                                          config.obstacleMargin,
+                                      obstacleMemory.points(nowSeconds));
+          haveGrid = true;
+        }
+        if (haveGrid) {
+          constexpr int maximumCostmapCells = 40000;
+          int stride = 1;
+          const auto bounded = zms::navigation::downsampleGrid(grid, maximumCostmapCells, stride);
+          if (!hasPublishedCostmap || !zms::navigation::sameGrid(bounded, lastPublishedCostmap)) {
+            lastPublishedCostmap = bounded;
+            hasPublishedCostmap = true;
+            Json payload;
+            payload = zms::navigation::gridToJson(bounded);
+            zms::contract::publish(session, costmapKey, payload);
+          }
+        }
+      }
+      const auto obstaclesPeriod = std::chrono::duration_cast<Clock::duration>(
+          std::chrono::duration<double>(1.0 / 5.0));
+      if (now - lastObstaclesPublish > obstaclesPeriod) {
+        lastObstaclesPublish = now;
+        Json payload = {{"contract", 1}, {"frame", "map"}, {"points", Json::array()}};
+        const auto memory = obstacleMemory.points(nowSeconds);
+        constexpr std::size_t maximumPoints = 10000;
+        for (std::size_t i = 0; i < memory.size() && i < maximumPoints; ++i) {
+          payload["points"].push_back({{"x", memory[i].x}, {"y", memory[i].y}});
+        }
+        zms::contract::publish(session, obstaclesKey, payload);
       }
     }
     {
@@ -898,6 +1034,7 @@ int run(const Config &config) {
     publishResult(session, resultKey, *active,
                   zms::contract::CommandState::Failed, "shutdown",
                   "stack stopped");
+    publishEmptyPaths(active->commandId);
   }
   return 0;
 }

@@ -38,6 +38,7 @@ that speaks the contract can use them; nothing links against this repository at 
   short-lived obstacle memory, and optional self-hit filtering
 - Rotate and back-up recovery when the robot is boxed in
 - Particle-filter localization against the map
+- Visualization outputs: the planned path, local detour, inflated costmap, and remembered obstacles
 - Progress, staleness, and ownership checks that end stuck or orphaned commands
 
 **Manipulation** (`zms_manipulation`)
@@ -48,6 +49,7 @@ that speaks the contract can use them; nothing links against this repository at 
 - RRT-Connect planning and synchronized trapezoidal trajectories
 - Cartesian straight-line moves
 - Gripper open, close, and position commands with grasp detection
+- Visualization output: the planned joint trajectory with an end-effector path
 
 **Tooling**
 
@@ -172,6 +174,7 @@ zms_cli <robot-prefix> <client-id> <command> [arguments]
 | `manipulation-status` | | Manipulation status |
 | `mock-joints` | `<names> <positions>` | Set mock joint states |
 | `watch` | `<navigation\|manipulation> <id> <timeout-s>` | Print feedback until the command ends |
+| `watch-viz` | `<navigation\|manipulation> <timeout-s>` | Print visualization outputs until the timeout |
 
 `zms_mock_robot` accepts `--joints`, `--start`, `--wall`, `--obstacle`, `--odom-scale`, and
 `--odom-yaw-drift` to build test scenes.
@@ -197,8 +200,10 @@ All payloads are UTF-8 JSON with contract major version `1`. Keys are relative t
 | --- | --- | --- |
 | `navigation/goal`, `navigation/cancel`, `navigation/status` | query | Submit, cancel, and inspect navigation |
 | `navigation/feedback`, `navigation/result` | publish | Progress and terminal state |
+| `navigation/path`, `navigation/local_path`, `navigation/costmap`, `navigation/obstacles` | publish | Visualization of the planned path, detour, costmap, and obstacles |
 | `manipulation/target`, `manipulation/gripper`, `manipulation/cancel`, `manipulation/status` | query | Submit, cancel, and inspect manipulation |
 | `manipulation/feedback`, `manipulation/result` | publish | Progress and terminal state |
+| `manipulation/trajectory` | publish | Visualization of the planned joint trajectory |
 | `navigation/alive`, `manipulation/alive` | liveliness | Stack presence |
 | `cmd_vel`, `cmd_joints` | publish | Commands to the robot |
 | `odom`, `scan`, `map`, `joint_states` | subscribe | Robot state and sensors |

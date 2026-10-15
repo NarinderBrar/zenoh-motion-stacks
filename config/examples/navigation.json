@@ -7,6 +7,11 @@
   "scan_ignore_radius": 0.0,
   "footprint_radius": 0.25,
   "obstacle_margin": 0.1,
+  "visualization": {
+    "enabled": true,
+    "costmap_rate_hz": 1.0,
+    "path_rate_hz": 5.0
+  },
   "limits": {
     "max_linear_speed": 0.5,
     "max_angular_speed": 1.0,

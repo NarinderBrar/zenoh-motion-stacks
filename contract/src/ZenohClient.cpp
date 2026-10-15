@@ -8,6 +8,12 @@
 
 namespace zms::contract {
 
+zenoh::Config sessionConfig() {
+  auto config = zenoh::Config::create_default();
+  config.insert_json5("adminspace/enabled", "true");
+  return config;
+}
+
 nlohmann::json query(zenoh::Session &session, const std::string &key,
                      const std::optional<nlohmann::json> &payload,
                      std::chrono::milliseconds timeout) {

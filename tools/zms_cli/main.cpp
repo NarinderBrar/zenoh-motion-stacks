@@ -120,6 +120,44 @@ Json watchResult(zenoh::Session &session, const std::string &prefix,
   return *state->result;
 }
 
+Json watchVisualization(zenoh::Session &session, const std::string &prefix,
+                        const std::string &stack, int timeoutSeconds) {
+  if ((stack != "navigation" && stack != "manipulation") ||
+      timeoutSeconds < 1 || timeoutSeconds > 3600) {
+    throw std::invalid_argument("invalid stack or watch timeout");
+  }
+  const std::vector<std::string> suffixes =
+      stack == "navigation"
+          ? std::vector<std::string>{"navigation/path", "navigation/local_path",
+                                     "navigation/costmap",
+                                     "navigation/obstacles"}
+          : std::vector<std::string>{"manipulation/trajectory"};
+  std::mutex mutex;
+  std::size_t count = 0;
+  std::vector<std::unique_ptr<zenoh::Subscriber<void>>> subscribers;
+  for (const auto &suffix : suffixes) {
+    subscribers.push_back(std::make_unique<zenoh::Subscriber<void>>(
+        session.declare_subscriber(
+            zenoh::KeyExpr(zms::contract::key(prefix, suffix)),
+            [&mutex, &count, suffix](const zenoh::Sample &sample) {
+              try {
+                const auto value =
+                    Json::parse(sample.get_payload().as_string());
+                std::lock_guard lock(mutex);
+                ++count;
+                std::cout << suffix << ' ' << value.dump() << '\n';
+              } catch (const std::exception &) {
+              }
+            },
+            [] {})));
+  }
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSeconds);
+  std::this_thread::sleep_until(deadline);
+  std::lock_guard lock(mutex);
+  return {{"contract", 1}, {"stack", stack}, {"messages", count}};
+}
+
 }
 
 int main(int argc, char **argv) {
@@ -133,7 +171,8 @@ int main(int argc, char **argv) {
           "<qx> <qy> <qz> <qw> | gripper <command-id> open|close|<positions> | "
           "cancel-manipulation <command-id> | "
           "manipulation-status | mock-joints <names> <positions> | watch "
-          "<navigation|manipulation> <command-id> <timeout-s>");
+          "<navigation|manipulation> <command-id> <timeout-s> | watch-viz "
+          "<navigation|manipulation> <timeout-s>");
     }
     const std::string prefix = argv[1];
     const std::string clientId = argv[2];
@@ -211,6 +250,9 @@ int main(int argc, char **argv) {
     } else if (command == "watch" && argc == 7) {
       response =
           watchResult(session, prefix, argv[4], argv[5], seconds(argv[6]));
+    } else if (command == "watch-viz" && argc == 6) {
+      response =
+          watchVisualization(session, prefix, argv[4], seconds(argv[5]));
     } else {
       throw std::invalid_argument("invalid command or argument count");
     }

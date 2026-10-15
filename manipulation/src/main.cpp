@@ -4,6 +4,7 @@
 #include <zms/manipulation/JointModel.hpp>
 #include <zms/manipulation/Kinematics.hpp>
 #include <zms/manipulation/Planner.hpp>
+#include <zms/manipulation/Visualization.hpp>
 
 #include <zenoh.hxx>
 
@@ -373,7 +374,7 @@ Eigen::Isometry3d toIsometry(const zms::contract::PoseTarget &pose) {
 
 int run(const Config &config, const zms::manipulation::JointModel &model,
         const Planning &planning) {
-  zenoh::Session session(zenoh::Config::create_default());
+  zenoh::Session session(zms::contract::sessionConfig());
   const auto endpoint = [&](std::string_view suffix) {
     return zms::contract::key(config.robotPrefix, suffix);
   };
@@ -383,6 +384,7 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
   const auto feedbackKey = endpoint("manipulation/feedback");
   const auto resultKey = endpoint("manipulation/result");
   const auto commandKey = endpoint("cmd_joints");
+  const auto trajectoryKey = endpoint("manipulation/trajectory");
   Mailbox mailbox;
   const auto valid = [&planning](const std::vector<double> &positions) {
     return !planning.collision.inCollision(positions);
@@ -490,6 +492,7 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
       zenoh::KeyExpr(endpoint("manipulation/alive")));
 
   std::optional<zms::contract::Target> active;
+  bool activeIsPose = false;
   std::optional<std::uint64_t> planGeneration;
   std::optional<zms::manipulation::Trajectory> trajectory;
   Clock::time_point trajectoryStarted;
@@ -542,6 +545,19 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
     planGeneration.reset();
     trajectory.reset();
     active.reset();
+  };
+  const auto publishTrajectory = [&](const std::string &commandId,
+                                     const zms::manipulation::Trajectory &value,
+                                     bool pose) {
+    std::vector<std::string> names;
+    names.reserve(model.joints().size());
+    for (const auto &joint : model.joints()) {
+      names.push_back(joint.name);
+    }
+    zms::contract::publish(
+        session, trajectoryKey,
+        zms::manipulation::trajectoryToJson(commandId, names, value, pose,
+                                            &planning.chain));
   };
   auto next = Clock::now();
   while (!stopRequested) {
@@ -726,12 +742,15 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
                "replaced by owner");
       }
       active = target;
+      activeIsPose = std::holds_alternative<zms::contract::PoseTarget>(
+          target.value);
       goal = desired;
       commanded = measured;
       if (cartesianPath) {
         trajectory = zms::manipulation::timeParameterizeContinuous(
             *cartesianPath, model.joints(), config.acceleration);
         trajectoryStarted = now;
+        publishTrajectory(target.commandId, *trajectory, activeIsPose);
       } else {
         planGeneration = planner.submit(measured, desired);
       }
@@ -806,6 +825,7 @@ int run(const Config &config, const zms::manipulation::JointModel &model,
           trajectory = zms::manipulation::timeParameterize(
               *outcome->path, model.joints(), config.acceleration);
           trajectoryStarted = now;
+          publishTrajectory(active->commandId, *trajectory, activeIsPose);
         }
       }
     }

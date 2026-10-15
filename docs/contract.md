@@ -2,6 +2,8 @@
 
 The current implemented contract major version is **1**. Every payload this repository sends is UTF-8 JSON with Zenoh encoding `application/json`. The `contract` field is the integer `1`. Clients must reject an unknown major version. Command identifiers and client identifiers are nonempty strings of at most 128 characters.
 
+The stacks and the mock robot enable the Zenoh admin space, so monitoring tools can list their sessions, publishers, subscribers, and queryables.
+
 All keys below are relative to the configured robot prefix. A prefix has no leading slash. For example, prefix `demo/robot1` and suffix `odom` form `demo/robot1/odom`. An empty prefix uses the bare suffixes, such as `odom` and `cmd_vel`.
 
 | Key suffix | Zenoh operation | Current implementation |
@@ -12,6 +14,10 @@ All keys below are relative to the configured robot prefix. A prefix has no lead
 | `navigation/feedback` | publish | Current waypoint index and pose |
 | `navigation/result` | publish | Terminal command state |
 | `navigation/alive` | liveliness token | Presence |
+| `navigation/path` | publish | Planned global path and empty path on completion |
+| `navigation/local_path` | publish | Local detour while avoiding |
+| `navigation/costmap` | publish | Inflated occupancy grid the planner uses |
+| `navigation/obstacles` | publish | Remembered obstacle points |
 | `cmd_vel` | publish | Linear and angular velocity |
 | `odom` | subscribe | Base pose |
 | `scan` | subscribe | Optional 2D range scan; forward obstacle stop |
@@ -22,6 +28,7 @@ All keys below are relative to the configured robot prefix. A prefix has no lead
 | `manipulation/feedback` | publish | Joint execution progress and tracking error |
 | `manipulation/result` | publish | Terminal command state |
 | `manipulation/alive` | liveliness token | Presence |
+| `manipulation/trajectory` | publish | Planned joint trajectory and end-effector path |
 | `cmd_joints` | publish | Joint command samples |
 | `manipulation/gripper` | queryable | Open, close, or position the configured gripper |
 | `localization/pose` | publish | Map-frame pose estimate when localization is enabled |
@@ -61,6 +68,30 @@ Joint targets carry matching arrays of 1 to 64 unique names and finite positions
 ```
 
 The queryable reply, cancel request, command ownership rules, states, and terminal results have the same fields and meanings as navigation. `manipulation/feedback` additionally carries `progress` from 0 to 1 and `tracking_error` in radians. The stack publishes `cmd_joints` as `{"contract":1,"name":["joint_1"],"position":[0.3]}` and accepts `joint_states` as `{"name":["joint_1"],"position":[0.3],"velocity":[0.0]}`. All arrays must have equal length and names must be unique. A `joint_states` message may list up to 1024 joints, including joints outside the configured chain; the stack reads the chain joints by name and ignores the others. Measured positions are not checked against the URDF limits, so a small overshoot does not discard the message. A message that omits a chain joint is ignored.
+
+## Visualization outputs
+
+These optional outputs publish what the stacks plan internally so clients can draw it. They are always in the contract major version 1 and are controlled by the `visualization` config object. A client may ignore them.
+
+`navigation/path` publishes the global path the stack is following, once each time a route is planned or re-planned and again when the command ends (an empty `poses` array). The path is the map A* route when a map is available, otherwise the submitted waypoints. `navigation/local_path` publishes the local detour from obstacle avoidance at up to `path_rate_hz` while the robot is blocked or recovering, and an empty path otherwise. Both share the payload shape:
+
+```json
+{"contract":1,"command_id":"goal-1","frame":"map","poses":[{"x":1.0,"y":0.0,"yaw":0.0}]}
+```
+
+`navigation/costmap` publishes the inflated occupancy grid the planner uses in exactly the same shape as the `map` input: `contract`, `width`, `height`, `resolution`, `origin` with `x`, `y`, and `yaw`, and a row-major `data` array. With a map it is the map inflated by the footprint radius plus obstacle margin and marked with remembered scan obstacles; without a map it is a local rolling window around the robot built from current and remembered scan obstacles. It publishes at most `costmap_rate_hz` and only when the grid changed. Above 40000 cells the grid is downsampled (larger cells, adjusted resolution and origin) before publishing.
+
+`navigation/obstacles` publishes the remembered obstacle points in the odom/map frame at up to 5 Hz, capped at 10000 points:
+
+```json
+{"contract":1,"frame":"map","points":[{"x":1.0,"y":0.5}]}
+```
+
+`manipulation/trajectory` publishes the planned joint trajectory when a target is accepted and planned. `points` carries time in seconds and joint positions in radians and is downsampled to at most 200 points. For pose and Cartesian targets an `eef_path` array of `{x,y,z}` end-effector positions in the base frame is included:
+
+```json
+{"contract":1,"command_id":"pose-1","name":["joint_1","joint_2"],"points":[{"t":0.0,"position":[0.0,0.0]}],"eef_path":[{"x":0.3,"y":0.0,"z":0.2}]}
+```
 
 ## Optional navigation sensors
 
