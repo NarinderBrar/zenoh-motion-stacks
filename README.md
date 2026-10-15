@@ -1,60 +1,225 @@
-# Motion stacks for Eclipse zenoh
+# Zenoh Motion Stacks
 
-Standalone native Zenoh motion processes and a versioned JSON contract. This repository ships a **navigation baseline**, a **manipulation stack** with pose inverse kinematics, FCL collision checking, RRT-Connect planning, and synchronized trajectories, a command line client, and a headless base and joint-arm mock. Navigation drives around scanned obstacles with a local A* detour and a dynamic window controller, re-plans through a map when blocked, and runs rotate and back-up recovery. It also localizes against a map with a particle filter. Manipulation adds Cartesian straight-line moves and gripper commands. Additional drive models remain planned work.
+Native [Eclipse Zenoh](https://zenoh.io) navigation and manipulation for mobile robots and arms, with no ROS dependency.
 
-## Build on Ubuntu 24.04
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)
+![Platform: Ubuntu 24.04](https://img.shields.io/badge/platform-Ubuntu%2024.04-E95420.svg)
+![Zenoh 1.5+](https://img.shields.io/badge/zenoh-1.5%2B-6E44FF.svg)
+![Version 0.2.0](https://img.shields.io/badge/version-0.2.0-lightgrey.svg)
 
-Install CMake 3.22+, Ninja, a C++20 compiler, Eigen, urdfdom, FCL 0.7, OMPL, nlohmann/json 3.11.3+, GoogleTest, zenoh-c 1.5.0+, and zenoh-cpp 1.5.0+ with its zenoh-c backend. The baseline installer checks Ubuntu 24.04 packages and installs missing ones. When needed, it adds the [official Eclipse Zenoh apt source](https://zenoh.io/docs/getting-started/installation/). It supports `--yes` and `--dry-run`:
+Zenoh Motion Stacks ships two standalone processes, `zms_navigation` and `zms_manipulation`. Each
+talks only native Zenoh through a small, versioned JSON contract. Any robot, simulator, or client
+that speaks the contract can use them; nothing links against this repository at runtime.
 
-```bash
-./scripts/install_dependencies.sh --dry-run
-./scripts/install_dependencies.sh
+## Contents
+
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [Build](#build)
+- [Quick start](#quick-start)
+- [Command-line client](#command-line-client)
+- [Configuration](#configuration)
+- [Contract](#contract)
+- [Testing](#testing)
+- [Install and package](#install-and-package)
+- [Repository layout](#repository-layout)
+- [Project status](#project-status)
+- [License](#license)
+
+## Features
+
+**Navigation** (`zms_navigation`)
+
+- Waypoint routes for differential-drive bases, with acceleration-limited velocity output
+- A\* path planning through an occupancy grid, with re-planning when the route is blocked
+- Obstacle avoidance from a 2D laser scan: rolling local A\* detours, a dynamic window controller,
+  short-lived obstacle memory, and optional self-hit filtering
+- Rotate and back-up recovery when the robot is boxed in
+- Particle-filter localization against the map
+- Progress, staleness, and ownership checks that end stuck or orphaned commands
+
+**Manipulation** (`zms_manipulation`)
+
+- Joint targets and end-effector pose targets, checked against URDF joint limits
+- Damped least-squares inverse kinematics
+- Self and environment collision checking with FCL on URDF primitives
+- RRT-Connect planning and synchronized trapezoidal trajectories
+- Cartesian straight-line moves
+- Gripper open, close, and position commands with grasp detection
+
+**Tooling**
+
+- `zms_cli`: command-line client for every contract request
+- `zms_mock_robot`: headless base and joint-arm mock with optional walls, obstacles, scan, and odometry drift
+- `zms_conformance`: contract conformance suite that runs against any implementation
+
+## How it works
+
+```mermaid
+flowchart LR
+    Client["Client<br/>(zms_cli, app, script)"]
+    Nav["zms_navigation"]
+    Manip["zms_manipulation"]
+    Robot["Robot, simulator,<br/>or zms_mock_robot"]
+
+    Client -- "navigation/goal · cancel · status" --> Nav
+    Nav -- "feedback · result" --> Client
+    Client -- "manipulation/target · gripper · cancel · status" --> Manip
+    Manip -- "feedback · result" --> Client
+    Nav -- "cmd_vel" --> Robot
+    Robot -- "odom · scan · map" --> Nav
+    Manip -- "cmd_joints" --> Robot
+    Robot -- "joint_states" --> Manip
 ```
 
-Zenoh-c must be installed before configuring this repository. If its development package is unavailable from your configured apt sources, use the [upstream Zenoh C++ guide](https://github.com/eclipse-zenoh/zenoh-cpp#how-to-build-and-install-it). The `system` preset uses installed packages:
+Requests are Zenoh queries that are accepted or rejected immediately. Progress and terminal results
+are published. Each stack declares a liveliness token, so clients can see when it is running.
+All keys sit under a configurable robot prefix, which allows several robots on one network.
+
+## Requirements
+
+| Dependency | Version |
+| --- | --- |
+| Ubuntu | 24.04 |
+| CMake | 3.22 or later |
+| Compiler | C++20 |
+| Ninja | any recent |
+| zenoh-c and zenoh-cpp | 1.5.0 or later |
+| nlohmann/json | 3.11.3 or later |
+| Eigen, urdfdom, FCL 0.7, OMPL | Ubuntu 24.04 packages |
+| GoogleTest | for tests |
+
+The installer checks these packages and installs the missing ones. When needed, it adds the
+[official Eclipse Zenoh apt source](https://zenoh.io/docs/getting-started/installation/).
+
+```bash
+./scripts/install_dependencies.sh --dry-run   # show what would be installed
+./scripts/install_dependencies.sh             # install; add --yes to skip prompts
+```
+
+If the zenoh-c development package is not available from your apt sources, build it from the
+[upstream Zenoh C++ guide](https://github.com/eclipse-zenoh/zenoh-cpp#how-to-build-and-install-it).
+
+## Build
 
 ```bash
 cmake --preset system
 cmake --build --preset system
-ctest --preset system
 ```
 
-`cmake --preset release` can fetch missing nlohmann/json and zenoh-cpp from checksum-pinned archives. It still requires an installed zenoh-c. The installer does not yet cover the advanced planning libraries. Install and packaging targets are available only when all dependencies were found on the system.
+| Preset | Use |
+| --- | --- |
+| `system` | Uses installed packages only. Output in `build/system`. |
+| `release` | Fetches missing nlohmann/json and zenoh-cpp from checksum-pinned archives. zenoh-c must still be installed. Output in `build/release`. |
 
-Install the current binaries and libraries with `cmake --install build/system --prefix <directory>`, or create a tarball with `cpack --config build/system/CPackConfig.cmake`.
-The exported CMake package is `motion_stacks`, with
-`motion_stacks::contract`, `motion_stacks::contract_transport`, and
-`motion_stacks::navigation_core` and `motion_stacks::manipulation_core` targets.
+Install and packaging targets are generated only when every dependency is found on the system.
 
-`docker build -t motion-stacks .` runs the same baseline installer, build, and live tests in an Ubuntu 24.04 image. The container path has not yet been verified locally. The tarball uses installed system libraries; it does not bundle dependency binaries.
+## Quick start
 
-## Run a local demonstration
-
-Open three terminals from this repository. The mock robot publishes odometry and stops if commands cease:
+Run the navigation stack against the mock robot. Open three terminals in the repository root.
 
 ```bash
+# 1. Mock robot: publishes odometry and stops if commands cease
 build/system/zms_mock_robot demo/robot1
 ```
 
 ```bash
+# 2. Navigation stack
 build/system/zms_navigation --config config/examples/navigation.json
 ```
 
 ```bash
+# 3. Send a goal and check status
 build/system/zms_cli demo/robot1 operator-1 goal goal-1 1 0 0
 build/system/zms_cli demo/robot1 operator-1 status
 ```
 
-Press Ctrl+C in the first two terminals to stop them. The stack can also be addressed by any client that follows [`docs/contract.md`](docs/contract.md). The executable reports its supported versions with `--version` and validates configuration with `--check-config <file>`.
+For manipulation, start the mock with arm joints, then the manipulation stack:
 
-To exercise direct-joint manipulation, start the mock with `--joints joint_1,joint_2`, start
-`build/system/zms_manipulation --config config/examples/manipulation.json`, and run
-`build/system/zms_cli demo/robot1 operator-1 joint-target move-1 joint_1,joint_2 0.3,-0.2`.
-See [`docs/manipulation.md`](docs/manipulation.md) for the supported scope and configuration.
+```bash
+build/system/zms_mock_robot demo/robot1 --joints joint_1,joint_2
+build/system/zms_manipulation --config config/examples/manipulation.json
+build/system/zms_cli demo/robot1 operator-1 joint-target move-1 joint_1,joint_2 0.3,-0.2
+```
 
-## Status and scope
+Stop each process with <kbd>Ctrl</kbd>+<kbd>C</kbd>.
 
-The repository is at an early implementation stage. Navigation follows waypoints, plans through occupancy grids with A*, and avoids scanned obstacles. It does not use OMPL. Manipulation accepts joint and pose targets and plans collision-free joint paths; it has no Cartesian moves, gripper commands, mesh collision, or jerk-limited stop yet. Advanced planning, full dependency automation, clean-container verification, and desktop client integration remain open. The default test suite covers codecs, URDF validation, and a fake stack. The optional native Zenoh integration tests cover navigation and joint and pose manipulation with the mock robot:
+Both stacks support two utility flags:
+
+```bash
+zms_navigation --version                    # supported contract and configuration versions
+zms_navigation --check-config <file.json>   # validate a configuration and exit
+```
+
+## Command-line client
+
+```text
+zms_cli <robot-prefix> <client-id> <command> [arguments]
+```
+
+| Command | Arguments | Description |
+| --- | --- | --- |
+| `goal` | `<id> <x> <y> <yaw>` | Send a navigation goal |
+| `cancel` | `<id>` | Cancel a navigation command |
+| `status` | | Navigation status |
+| `joint-target` | `<id> <names> <positions>` | Move arm joints (comma-separated lists) |
+| `pose-target` | `<id> <x> <y> <z> <qx> <qy> <qz> <qw>` | Move the end effector to a pose |
+| `cartesian-target` | `<id> <x> <y> <z> <qx> <qy> <qz> <qw>` | Move the end effector along a straight line |
+| `gripper` | `<id> open\|close\|<positions>` | Command the gripper |
+| `cancel-manipulation` | `<id>` | Cancel a manipulation command |
+| `manipulation-status` | | Manipulation status |
+| `mock-joints` | `<names> <positions>` | Set mock joint states |
+| `watch` | `<navigation\|manipulation> <id> <timeout-s>` | Print feedback until the command ends |
+
+`zms_mock_robot` accepts `--joints`, `--start`, `--wall`, `--obstacle`, `--odom-scale`, and
+`--odom-yaw-drift` to build test scenes.
+
+## Configuration
+
+Each stack reads one JSON file. Examples are in [`config/examples`](config/examples):
+
+| File | Purpose |
+| --- | --- |
+| `navigation.json` | Navigation limits, footprint, avoidance, and localization |
+| `manipulation.json` | Two-joint arm example (`two_joint_arm.urdf`) |
+| `mobile_manipulator.json` | Mobile manipulator example (`mobile_manipulator.urdf`) |
+
+Field reference: [`docs/configuration.md`](docs/configuration.md),
+[`docs/navigation.md`](docs/navigation.md), and [`docs/manipulation.md`](docs/manipulation.md).
+
+## Contract
+
+All payloads are UTF-8 JSON with contract major version `1`. Keys are relative to the robot prefix.
+
+| Key | Operation | Purpose |
+| --- | --- | --- |
+| `navigation/goal`, `navigation/cancel`, `navigation/status` | query | Submit, cancel, and inspect navigation |
+| `navigation/feedback`, `navigation/result` | publish | Progress and terminal state |
+| `manipulation/target`, `manipulation/gripper`, `manipulation/cancel`, `manipulation/status` | query | Submit, cancel, and inspect manipulation |
+| `manipulation/feedback`, `manipulation/result` | publish | Progress and terminal state |
+| `navigation/alive`, `manipulation/alive` | liveliness | Stack presence |
+| `cmd_vel`, `cmd_joints` | publish | Commands to the robot |
+| `odom`, `scan`, `map`, `joint_states` | subscribe | Robot state and sensors |
+| `localization/pose`, `localization/initial_pose` | publish / subscribe | Localization estimate and start pose |
+
+The full specification, including payloads and rejection reasons, is in
+[`docs/contract.md`](docs/contract.md).
+
+## Testing
+
+```bash
+ctest --preset system
+```
+
+| Suite | Coverage |
+| --- | --- |
+| `zms_unit_tests` | Codecs, configuration validation, URDF, kinematics, collision, planners, avoidance, Cartesian regression |
+| `zms_conformance` | Contract behaviour against a fake stack |
+| `zms_navigation_integration` | Live Zenoh with the mock robot: navigation workflow, obstacle avoidance, localization with drifting odometry, joint targets, gripper, and tracking failure |
+
+The live Zenoh integration tests are opt-in:
 
 ```bash
 cmake --preset system -DZMS_ENABLE_LIVE_TESTS=ON
@@ -62,8 +227,72 @@ cmake --build --preset system
 ctest --preset system
 ```
 
-The conformance executable can target a separately running navigation stack with `ZMS_CONFORMANCE_PREFIX=<robot-prefix> build/system/zms_conformance`. See [`docs/navigation.md`](docs/navigation.md) and [`docs/manipulation.md`](docs/manipulation.md).
+To check a separately running navigation stack against the contract:
 
-The source is licensed under Apache-2.0. See [`LICENSE`](LICENSE).
-Eclipse zenoh is a trademark of the Eclipse Foundation. This independent
-project is not affiliated with or endorsed by the Eclipse Foundation.
+```bash
+ZMS_CONFORMANCE_PREFIX=<robot-prefix> build/system/zms_conformance
+```
+
+## Install and package
+
+```bash
+cmake --install build/system --prefix <directory>     # install binaries and libraries
+cpack --config build/system/CPackConfig.cmake         # create a tarball
+```
+
+The exported CMake package is `motion_stacks`:
+
+```cmake
+find_package(motion_stacks REQUIRED)
+target_link_libraries(my_app PRIVATE motion_stacks::contract_transport)
+```
+
+| Target | Contents |
+| --- | --- |
+| `motion_stacks::contract` | Request and response codecs |
+| `motion_stacks::contract_transport` | Zenoh client and server helpers |
+| `motion_stacks::navigation_core` | Planning, following, avoidance, localization |
+| `motion_stacks::manipulation_core` | Kinematics, collision, planning, trajectories |
+
+The tarball links against installed system libraries; it does not bundle them.
+
+A [`Dockerfile`](Dockerfile) runs the installer, build, and live tests in an Ubuntu 24.04 image:
+
+```bash
+docker build -t zenoh-motion-stacks .
+```
+
+The container path has not yet been verified.
+
+## Repository layout
+
+```text
+contract/        Contract codecs and Zenoh transport helpers
+navigation/      zms_navigation and the navigation_core library
+manipulation/    zms_manipulation and the manipulation_core library
+tools/           zms_cli and zms_mock_robot
+tests/           unit, conformance, and integration tests
+config/examples/ Example configurations and URDFs
+docs/            Contract and stack reference
+scripts/         Dependency installer
+```
+
+## Project status
+
+Early stage, version 0.2.0. The contract is at major version 1.
+
+Planned:
+
+- Omnidirectional and car-like drive models
+- OMPL-based planning
+- Mesh collision geometry
+- Jerk-limited stopping
+- Runtime obstacle updates for manipulation
+- Verified clean-container build
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
+
+Eclipse Zenoh is a trademark of the Eclipse Foundation. This independent project is not affiliated
+with or endorsed by the Eclipse Foundation.
