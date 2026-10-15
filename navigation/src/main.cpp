@@ -938,7 +938,9 @@ int run(const Config &config) {
                                {{"contract", 1},
                                 {"command_id", active->commandId},
                                 {"frame", "map"},
-                                {"poses", zms::navigation::posesToJson(route)}});
+                                {"poses", pose ? zms::navigation::posesToJson(
+                                               zms::navigation::pathFromCurrentPose(*pose, route))
+                                          : zms::navigation::posesToJson(route)}});
       }
       if (active && now - lastLocalPathPublish > pathPeriod) {
         lastLocalPathPublish = now;
@@ -959,7 +961,9 @@ int run(const Config &config) {
                                {{"contract", 1},
                                 {"command_id", active->commandId},
                                 {"frame", "map"},
-                                {"poses", zms::navigation::posesToJson(localRoute)}});
+                                {"poses", pose ? zms::navigation::posesToJson(
+                                               zms::navigation::pathFromCurrentPose(*pose, localRoute))
+                                          : zms::navigation::posesToJson(localRoute)}});
       }
       const auto costmapPeriod = std::chrono::duration_cast<Clock::duration>(
           std::chrono::duration<double>(

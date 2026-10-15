@@ -73,7 +73,7 @@ The queryable reply, cancel request, command ownership rules, states, and termin
 
 These optional outputs publish what the stacks plan internally so clients can draw it. They are always in the contract major version 1 and are controlled by the `visualization` config object. A client may ignore them.
 
-`navigation/path` publishes the global path the stack is following, once each time a route is planned or re-planned and again when the command ends (an empty `poses` array). The path is the map A* route when a map is available, otherwise the submitted waypoints. `navigation/local_path` publishes the local detour from obstacle avoidance at up to `path_rate_hz` while the robot is blocked or recovering, and an empty path otherwise. Both share the payload shape:
+`navigation/path` publishes the global path the stack is following, once each time a route is planned or re-planned and again when the command ends (an empty `poses` array). The path starts with the current robot pose, followed by the map A* route when a map is available or the submitted waypoints otherwise. `navigation/local_path` starts with the current robot pose and then publishes the local detour from obstacle avoidance at up to `path_rate_hz` while the robot is blocked or recovering; it is empty otherwise. Both share the payload shape:
 
 ```json
 {"contract":1,"command_id":"goal-1","frame":"map","poses":[{"x":1.0,"y":0.0,"yaw":0.0}]}

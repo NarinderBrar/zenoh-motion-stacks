@@ -15,6 +15,16 @@ nlohmann::json posesToJson(const std::vector<contract::Waypoint> &poses) {
   return array;
 }
 
+std::vector<contract::Waypoint>
+pathFromCurrentPose(const Pose &currentPose,
+                    const std::vector<contract::Waypoint> &poses) {
+  std::vector<contract::Waypoint> path;
+  path.reserve(poses.size() + 1);
+  path.push_back({currentPose.x, currentPose.y, currentPose.yaw});
+  path.insert(path.end(), poses.begin(), poses.end());
+  return path;
+}
+
 nlohmann::json gridToJson(const OccupancyGrid &grid) {
   nlohmann::json data = nlohmann::json::array();
   for (const auto cell : grid.cells) {

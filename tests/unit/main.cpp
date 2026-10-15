@@ -883,6 +883,17 @@ TEST(Visualization, EncodesNavigationPathPayload) {
   EXPECT_TRUE(zms::navigation::posesToJson({}).empty());
 }
 
+TEST(Visualization, PrependsCurrentPoseToPublishedPath) {
+  const zms::navigation::Pose current{1.0, 2.0, 0.5};
+  const std::vector<zms::contract::Waypoint> route = {{3.0, 4.0, -0.25}};
+  const auto path = zms::navigation::pathFromCurrentPose(current, route);
+  ASSERT_EQ(path.size(), 2u);
+  EXPECT_EQ(path.front().x, 1.0);
+  EXPECT_EQ(path.front().y, 2.0);
+  EXPECT_EQ(path.front().yaw, 0.5);
+  EXPECT_EQ(path.back(), route.front());
+}
+
 TEST(Visualization, EncodesOccupancyGridInMapShape) {
   zms::navigation::OccupancyGrid grid;
   grid.width = 2;

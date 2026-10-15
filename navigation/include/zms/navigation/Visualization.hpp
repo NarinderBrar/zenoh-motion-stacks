@@ -12,6 +12,9 @@
 namespace zms::navigation {
 
 nlohmann::json posesToJson(const std::vector<contract::Waypoint> &poses);
+std::vector<contract::Waypoint>
+pathFromCurrentPose(const Pose &currentPose,
+                    const std::vector<contract::Waypoint> &poses);
 nlohmann::json gridToJson(const OccupancyGrid &grid);
 OccupancyGrid inflateGrid(const OccupancyGrid &grid, double radius);
 void markPoints(OccupancyGrid &grid, const std::vector<Point2> &points);
