@@ -540,8 +540,6 @@ int run(const Config &config) {
   Clock::time_point lastLocalPathPublish = Clock::time_point();
   Clock::time_point lastCostmapPublish = Clock::time_point();
   Clock::time_point lastObstaclesPublish = Clock::time_point();
-  zms::navigation::OccupancyGrid lastPublishedCostmap;
-  bool hasPublishedCostmap = false;
   std::vector<zms::contract::Waypoint> lastPublishedRoute;
   const auto submittedWaypointIndex = [&] {
     if (routePlannedFromMap && waypointIndex < routeWaypointIndices.size()) {
@@ -991,13 +989,8 @@ int run(const Config &config) {
           constexpr int maximumCostmapCells = 40000;
           int stride = 1;
           const auto bounded = zms::navigation::downsampleGrid(grid, maximumCostmapCells, stride);
-          if (!hasPublishedCostmap || !zms::navigation::sameGrid(bounded, lastPublishedCostmap)) {
-            lastPublishedCostmap = bounded;
-            hasPublishedCostmap = true;
-            Json payload;
-            payload = zms::navigation::gridToJson(bounded);
-            zms::contract::publish(session, costmapKey, payload);
-          }
+          zms::contract::publish(session, costmapKey,
+                                 zms::navigation::gridToJson(bounded));
         }
       }
       const auto obstaclesPeriod = std::chrono::duration_cast<Clock::duration>(

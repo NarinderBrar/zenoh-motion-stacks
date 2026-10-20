@@ -29,4 +29,8 @@ With `localization.enabled`, the stack runs a particle filter against the `map` 
 
 With `visualization.enabled` (the default) the stack publishes its internal plans for clients, described in `contract.md`: `navigation/path` (global route, re-published on each plan and cleared when a command ends), `navigation/local_path` (the local detour while avoiding or recovering), `navigation/costmap` (the inflated grid the planner uses, or a local rolling window when no map is available), and `navigation/obstacles` (remembered scan points). Rates come from `visualization.path_rate_hz` and `visualization.costmap_rate_hz`. The costmap is published in the same shape as the `map` input and downsampled above 40000 cells.
 
+Costmap visualization repeats at the configured rate even when the grid is unchanged.
+This allows late subscribers and re-enabled displays to receive the current costmap without
+requiring robot motion or obstacle changes.
+
 Not yet implemented: persistent costmap layers, omnidirectional and car-like drive models, and behavior trees.

@@ -79,7 +79,7 @@ These optional outputs publish what the stacks plan internally so clients can dr
 {"contract":1,"command_id":"goal-1","frame":"map","poses":[{"x":1.0,"y":0.0,"yaw":0.0}]}
 ```
 
-`navigation/costmap` publishes the inflated occupancy grid the planner uses in exactly the same shape as the `map` input: `contract`, `width`, `height`, `resolution`, `origin` with `x`, `y`, and `yaw`, and a row-major `data` array. With a map it is the map inflated by the footprint radius plus obstacle margin and marked with remembered scan obstacles; without a map it is a local rolling window around the robot built from current and remembered scan obstacles. It publishes at most `costmap_rate_hz` and only when the grid changed. Above 40000 cells the grid is downsampled (larger cells, adjusted resolution and origin) before publishing.
+`navigation/costmap` publishes the inflated occupancy grid the planner uses in exactly the same shape as the `map` input: `contract`, `width`, `height`, `resolution`, `origin` with `x`, `y`, and `yaw`, and a row-major `data` array. With a map it is the map inflated by the footprint radius plus obstacle margin and marked with remembered scan obstacles; without a map it is a local rolling window around the robot built from current and remembered scan obstacles. It publishes at most `costmap_rate_hz`, including unchanged grids so late subscribers and re-enabled visualizers receive the current map. Above 40000 cells the grid is downsampled (larger cells, adjusted resolution and origin) before publishing.
 
 `navigation/obstacles` publishes the remembered obstacle points in the odom/map frame at up to 5 Hz, capped at 10000 points:
 

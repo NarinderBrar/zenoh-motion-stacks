@@ -447,6 +447,46 @@ void waitForStack(zenoh::Session &session, const std::string &prefix,
 
 }
 
+TEST(Integration, UnchangedGlobalCostmapReachesLateSubscriber) {
+  const auto executableDirectory =
+      std::filesystem::canonical("/proc/self/exe").parent_path();
+  const std::string prefix = "late-costmap/" + std::to_string(getpid());
+  TemporaryConfig config(prefix);
+  Process stack(executableDirectory / "zms_navigation",
+                {"--config", config.path().string()});
+  zenoh::Session session(zenoh::Config::create_default());
+  Observations initial;
+  const auto costmapKey = zms::contract::key(prefix, "navigation/costmap");
+  auto firstSubscriber = session.declare_subscriber(
+      zenoh::KeyExpr(costmapKey),
+      [&](const zenoh::Sample &sample) { initial.costmap(sample); }, [] {});
+  waitForStack(session, prefix);
+  const Json map = {{"contract", 1},
+                    {"width", 20},
+                    {"height", 15},
+                    {"resolution", 0.1},
+                    {"origin", {{"x", -1.0}, {"y", -1.0}, {"yaw", 0.0}}},
+                    {"data", std::vector<int>(300, 0)}};
+  bool mapAvailable = false;
+  const auto deadline = Clock::now() + 5s;
+  while (!mapAvailable && Clock::now() < deadline) {
+    zms::contract::publish(session, zms::contract::key(prefix, "map"), map);
+    const auto status = zms::contract::query(
+        session, zms::contract::key(prefix, "navigation/status"), std::nullopt);
+    mapAvailable = status.value("map_available", false);
+    if (!mapAvailable) {
+      std::this_thread::sleep_for(50ms);
+    }
+  }
+  ASSERT_TRUE(mapAvailable);
+  ASSERT_TRUE(initial.waitForCostmapSize(20, 15, 5s));
+  Observations late;
+  auto lateSubscriber = session.declare_subscriber(
+      zenoh::KeyExpr(costmapKey),
+      [&](const zenoh::Sample &sample) { late.costmap(sample); }, [] {});
+  EXPECT_TRUE(late.waitForCostmapSize(20, 15, 3s));
+}
+
 TEST(Integration, NavigationWorkflow) {
   const auto executableDirectory =
       std::filesystem::canonical("/proc/self/exe").parent_path();
